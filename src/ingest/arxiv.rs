@@ -1,6 +1,13 @@
 //! arXiv API client and ID parsing (PRD §4 input + step 1).
 
-use crate::{KbError, PaperMetadata};
+use crate::{KbError, PaperMetadata, SCHEMA_VERSION, SourceFormat, now_rfc3339};
+use std::time::Duration;
+
+/// All arXiv API URL construction lives here (single place; the HTTP path
+/// of [`fetch_metadata`] is intentionally thin so parsing stays testable).
+pub(crate) fn metadata_query_url(arxiv_id: &str) -> String {
+    format!("https://export.arxiv.org/api/query?id_list={arxiv_id}")
+}
 
 /// Parse any accepted form into `(canonical_id, version)`:
 ///
@@ -16,8 +23,62 @@ use crate::{KbError, PaperMetadata};
 /// v0.1 always fetches the latest version but records what it got.
 /// Unrecognized input is a `Usage` error (exit 1).
 pub fn parse_arxiv_id(input: &str) -> Result<(String, Option<String>), KbError> {
-    let _ = input;
-    todo!("implemented in the ingest slice")
+    let usage = || KbError::Usage(format!("unrecognized arXiv id or URL: {input}"));
+
+    let mut s = input.trim();
+    // Drop query string / fragment, then trailing slashes.
+    s = s.split(['?', '#']).next().unwrap_or(s);
+    s = s.trim_end_matches('/');
+
+    for scheme in ["https://", "http://"] {
+        if let Some(rest) = s.strip_prefix(scheme) {
+            s = rest;
+            break;
+        }
+    }
+    if let Some(rest) = s.strip_prefix("www.") {
+        s = rest;
+    }
+
+    if let Some(rest) = s.strip_prefix("arxiv.org/") {
+        s = rest
+            .strip_prefix("abs/")
+            .or_else(|| rest.strip_prefix("pdf/"))
+            .ok_or_else(usage)?;
+        // Tolerate an explicit `.pdf` extension on pdf URLs.
+        s = s.strip_suffix(".pdf").unwrap_or(s);
+    } else if s.len() >= 6 && s[..6].eq_ignore_ascii_case("arxiv:") {
+        s = &s[6..];
+    }
+
+    split_id_version(s).ok_or_else(usage)
+}
+
+/// `"2504.19874v2"` → `("2504.19874", Some("v2"))`. None if the string is
+/// not a modern-scheme arXiv id.
+fn split_id_version(s: &str) -> Option<(String, Option<String>)> {
+    let bytes = s.as_bytes();
+    if bytes.len() < 9 || !bytes[..4].iter().all(u8::is_ascii_digit) || bytes[4] != b'.' {
+        return None;
+    }
+    let after_dot = &s[5..];
+    let num_len = after_dot
+        .bytes()
+        .take_while(u8::is_ascii_digit)
+        .count();
+    if !(4..=5).contains(&num_len) {
+        return None;
+    }
+    let id = format!("{}.{}", &s[..4], &after_dot[..num_len]);
+    let tail = &after_dot[num_len..];
+    if tail.is_empty() {
+        return Some((id, None));
+    }
+    let digits = tail.strip_prefix('v')?;
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    Some((id, Some(tail.to_string())))
 }
 
 /// Fetch metadata from `https://export.arxiv.org/api/query?id_list={id}`
@@ -29,8 +90,39 @@ pub async fn fetch_metadata(
     client: &reqwest::Client,
     arxiv_id: &str,
 ) -> Result<PaperMetadata, KbError> {
-    let _ = (client, arxiv_id);
-    todo!("implemented in the ingest slice")
+    const MAX_ATTEMPTS: u32 = 3;
+    const RETRY_DELAY: Duration = Duration::from_secs(3);
+
+    let url = metadata_query_url(arxiv_id);
+    let mut last_err = KbError::Network("arXiv API: request not attempted".to_string());
+    for attempt in 1..=MAX_ATTEMPTS {
+        if attempt > 1 {
+            tracing::warn!(
+                "arXiv API attempt {} failed ({last_err}); retrying in {}s",
+                attempt - 1,
+                RETRY_DELAY.as_secs()
+            );
+            tokio::time::sleep(RETRY_DELAY).await;
+        }
+        match client.get(&url).send().await {
+            Ok(resp) => {
+                let status = resp.status();
+                if status.is_success() {
+                    let body = resp.text().await.map_err(KbError::from)?;
+                    return parse_atom_metadata(&body, arxiv_id);
+                }
+                let err = KbError::Network(format!("arXiv API returned HTTP {status}"));
+                let retryable = status == reqwest::StatusCode::TOO_MANY_REQUESTS
+                    || status.is_server_error();
+                if !retryable {
+                    return Err(err);
+                }
+                last_err = err;
+            }
+            Err(e) => last_err = e.into(),
+        }
+    }
+    Err(last_err)
 }
 
 /// Parse the Atom XML payload into PaperMetadata. Separated from the HTTP
@@ -43,6 +135,280 @@ pub async fn fetch_metadata(
 /// pipeline if the e-print has no LaTeX), `schema_version` = SCHEMA_VERSION.
 /// An Atom feed with zero entries ⇒ `NotFound`.
 pub fn parse_atom_metadata(xml: &str, arxiv_id: &str) -> Result<PaperMetadata, KbError> {
-    let _ = (xml, arxiv_id);
-    todo!("implemented in the ingest slice")
+    let doc = roxmltree::Document::parse(xml)
+        .map_err(|e| KbError::Network(format!("arXiv API returned malformed XML: {e}")))?;
+
+    let entry = doc
+        .root_element()
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "entry")
+        .ok_or_else(|| KbError::NotFound(format!("paper {arxiv_id} not found on arxiv")))?;
+
+    let child_text = |name: &str| -> Option<String> {
+        entry
+            .children()
+            .find(|n| n.is_element() && n.tag_name().name() == name)
+            .map(|n| element_text(&n))
+    };
+
+    let title = normalize_whitespace(&child_text("title").unwrap_or_default());
+    if title.is_empty() {
+        return Err(KbError::Network(format!(
+            "arXiv API entry for {arxiv_id} has no title"
+        )));
+    }
+
+    let authors: Vec<String> = entry
+        .children()
+        .filter(|n| n.is_element() && n.tag_name().name() == "author")
+        .filter_map(|a| {
+            a.children()
+                .find(|n| n.is_element() && n.tag_name().name() == "name")
+                .map(|n| normalize_whitespace(&element_text(&n)))
+        })
+        .filter(|n| !n.is_empty())
+        .collect();
+
+    let categories: Vec<String> = entry
+        .children()
+        .filter(|n| n.is_element() && n.tag_name().name() == "category")
+        .filter_map(|c| c.attribute("term").map(str::to_string))
+        .collect();
+
+    // <id>http://arxiv.org/abs/2504.19874v2</id> → version "v2"
+    let version = child_text("id")
+        .and_then(|id_url| {
+            let tail = id_url.trim();
+            let tail = tail.rsplit("/abs/").next().unwrap_or(tail);
+            split_id_version(tail)
+        })
+        .and_then(|(_, v)| v);
+
+    Ok(PaperMetadata {
+        arxiv_id: arxiv_id.to_string(),
+        version,
+        title,
+        authors,
+        abstract_text: child_text("summary").unwrap_or_default().trim().to_string(),
+        categories,
+        published_at: child_text("published").unwrap_or_default().trim().to_string(),
+        updated_at: child_text("updated").unwrap_or_default().trim().to_string(),
+        ingested_at: now_rfc3339(),
+        source_format: SourceFormat::Latex,
+        main_tex: None,
+        tags: Vec::new(),
+        schema_version: SCHEMA_VERSION,
+    })
+}
+
+/// All descendant text of an element, concatenated (titles occasionally
+/// contain nested markup).
+fn element_text(node: &roxmltree::Node) -> String {
+    node.descendants()
+        .filter(|n| n.is_text())
+        .filter_map(|n| n.text())
+        .collect()
+}
+
+fn normalize_whitespace(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -------- parse_arxiv_id --------
+
+    #[test]
+    fn parses_bare_id() {
+        assert_eq!(
+            parse_arxiv_id("2504.19874").unwrap(),
+            ("2504.19874".to_string(), None)
+        );
+    }
+
+    #[test]
+    fn parses_bare_id_with_version() {
+        assert_eq!(
+            parse_arxiv_id("2504.19874v2").unwrap(),
+            ("2504.19874".to_string(), Some("v2".to_string()))
+        );
+    }
+
+    #[test]
+    fn parses_arxiv_prefix() {
+        assert_eq!(
+            parse_arxiv_id("arxiv:2504.19874").unwrap(),
+            ("2504.19874".to_string(), None)
+        );
+        // Case-insensitive prefix.
+        assert_eq!(
+            parse_arxiv_id("arXiv:2504.19874v3").unwrap(),
+            ("2504.19874".to_string(), Some("v3".to_string()))
+        );
+    }
+
+    #[test]
+    fn parses_abs_url() {
+        assert_eq!(
+            parse_arxiv_id("https://arxiv.org/abs/2504.19874").unwrap(),
+            ("2504.19874".to_string(), None)
+        );
+    }
+
+    #[test]
+    fn parses_pdf_url() {
+        assert_eq!(
+            parse_arxiv_id("https://arxiv.org/pdf/2504.19874").unwrap(),
+            ("2504.19874".to_string(), None)
+        );
+    }
+
+    #[test]
+    fn parses_pdf_url_with_version() {
+        assert_eq!(
+            parse_arxiv_id("https://arxiv.org/pdf/2504.19874v2").unwrap(),
+            ("2504.19874".to_string(), Some("v2".to_string()))
+        );
+    }
+
+    #[test]
+    fn parses_url_variants() {
+        // http scheme, www host, trailing slash, query string, .pdf suffix
+        assert_eq!(
+            parse_arxiv_id("http://www.arxiv.org/abs/2504.19874/").unwrap().0,
+            "2504.19874"
+        );
+        assert_eq!(
+            parse_arxiv_id("https://arxiv.org/pdf/2504.19874v1.pdf").unwrap(),
+            ("2504.19874".to_string(), Some("v1".to_string()))
+        );
+        assert_eq!(
+            parse_arxiv_id("https://arxiv.org/abs/2504.19874?context=cs.IR")
+                .unwrap()
+                .0,
+            "2504.19874"
+        );
+    }
+
+    #[test]
+    fn parses_four_digit_number_part() {
+        assert_eq!(
+            parse_arxiv_id("2405.1249").unwrap(),
+            ("2405.1249".to_string(), None)
+        );
+    }
+
+    #[test]
+    fn rejects_bad_input() {
+        for bad in [
+            "",
+            "abc",
+            "250.19874",          // 3-digit prefix
+            "2504.198",           // too few digits after dot
+            "2504.198745v",       // 6 digits... also dangling v
+            "2504.19874v",        // dangling version
+            "2504.19874vX",       // non-numeric version
+            "2504-19874",         // wrong separator
+            "https://arxiv.org/html/2504.19874", // unsupported path
+            "https://example.com/abs/2504.19874",
+            "math.GT/0309136",    // old-scheme id (out of scope for v0.1)
+        ] {
+            let err = parse_arxiv_id(bad).unwrap_err();
+            assert!(matches!(err, KbError::Usage(_)), "{bad:?} gave {err:?}");
+        }
+    }
+
+    #[test]
+    fn rejects_six_digit_suffix() {
+        assert!(matches!(
+            parse_arxiv_id("2504.198746").unwrap_err(),
+            KbError::Usage(_)
+        ));
+    }
+
+    // -------- parse_atom_metadata --------
+
+    const FIXTURE: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <link href="http://arxiv.org/api/query?search_query%3D%26id_list%3D2504.19874" rel="self" type="application/atom+xml"/>
+  <title type="html">ArXiv Query: search_query=&amp;id_list=2504.19874</title>
+  <id>http://arxiv.org/api/abc123</id>
+  <updated>2026-06-01T00:00:00-04:00</updated>
+  <opensearch:totalResults xmlns:opensearch="http://a9.com/-/spec/opensearch/1.1/">1</opensearch:totalResults>
+  <entry>
+    <id>http://arxiv.org/abs/2504.19874v2</id>
+    <updated>2024-09-15T17:12:45Z</updated>
+    <published>2024-04-28T14:02:21Z</published>
+    <title>TurboQuant: Online Vector Quantization with
+  Near-optimal Distortion Rate</title>
+    <summary>  We present TurboQuant, an online vector quantization
+algorithm achieving near-optimal distortion rate.
+</summary>
+    <author>
+      <name>Amir Zandieh</name>
+    </author>
+    <author>
+      <name>Majid Daliri</name>
+    </author>
+    <arxiv:comment xmlns:arxiv="http://arxiv.org/schemas/atom">29 pages</arxiv:comment>
+    <link href="http://arxiv.org/abs/2504.19874v2" rel="alternate" type="text/html"/>
+    <link title="pdf" href="http://arxiv.org/pdf/2504.19874v2" rel="related" type="application/pdf"/>
+    <arxiv:primary_category xmlns:arxiv="http://arxiv.org/schemas/atom" term="cs.IR" scheme="http://arxiv.org/schemas/atom"/>
+    <category term="cs.IR" scheme="http://arxiv.org/schemas/atom"/>
+    <category term="cs.LG" scheme="http://arxiv.org/schemas/atom"/>
+  </entry>
+</feed>"#;
+
+    #[test]
+    fn parses_atom_entry() {
+        let meta = parse_atom_metadata(FIXTURE, "2504.19874").unwrap();
+        assert_eq!(meta.arxiv_id, "2504.19874");
+        assert_eq!(meta.version.as_deref(), Some("v2"));
+        // Whitespace-normalized title (the fixture wraps across lines).
+        assert_eq!(
+            meta.title,
+            "TurboQuant: Online Vector Quantization with Near-optimal Distortion Rate"
+        );
+        assert_eq!(meta.authors, vec!["Amir Zandieh", "Majid Daliri"]);
+        assert!(meta.abstract_text.starts_with("We present TurboQuant"));
+        assert!(meta.abstract_text.ends_with("distortion rate."));
+        assert_eq!(meta.categories, vec!["cs.IR", "cs.LG"]);
+        assert_eq!(meta.published_at, "2024-04-28T14:02:21Z");
+        assert_eq!(meta.updated_at, "2024-09-15T17:12:45Z");
+        assert_eq!(meta.source_format, SourceFormat::Latex);
+        assert_eq!(meta.schema_version, SCHEMA_VERSION);
+        assert!(meta.main_tex.is_none());
+        assert!(meta.tags.is_empty());
+        assert!(!meta.ingested_at.is_empty());
+    }
+
+    #[test]
+    fn zero_entry_feed_is_not_found() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title type="html">ArXiv Query: search_query=&amp;id_list=9999.99999</title>
+  <id>http://arxiv.org/api/empty</id>
+  <updated>2026-06-01T00:00:00-04:00</updated>
+  <opensearch:totalResults xmlns:opensearch="http://a9.com/-/spec/opensearch/1.1/">0</opensearch:totalResults>
+</feed>"#;
+        let err = parse_atom_metadata(xml, "9999.99999").unwrap_err();
+        assert!(matches!(err, KbError::NotFound(_)), "got {err:?}");
+        assert!(err.to_string().contains("not found on arxiv"));
+    }
+
+    #[test]
+    fn malformed_xml_is_network_error() {
+        let err = parse_atom_metadata("this is not xml <", "2504.19874").unwrap_err();
+        assert!(matches!(err, KbError::Network(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn metadata_url_is_export_api() {
+        assert_eq!(
+            metadata_query_url("2504.19874"),
+            "https://export.arxiv.org/api/query?id_list=2504.19874"
+        );
+    }
 }
