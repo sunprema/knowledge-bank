@@ -177,7 +177,7 @@ async fn run(cli: Cli) -> Result<(), KbError> {
         Command::Add { id_or_url, pdf } => commands::add(&kb, id_or_url, pdf).await,
         Command::Update { arxiv_id } => commands::update(&kb, arxiv_id).await,
         Command::Remove { arxiv_id, yes } => commands::remove(&kb, arxiv_id, yes).await,
-        Command::Note { arxiv_id } => commands::note(&kb, arxiv_id),
+        Command::Note { arxiv_id } => commands::note(&kb, arxiv_id).await,
         Command::Tag { arxiv_id, tags } => commands::tag(&kb, arxiv_id, tags),
         Command::Search {
             query,
