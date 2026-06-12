@@ -57,7 +57,6 @@ fn status_reports_no_watcher() {
 }
 
 #[test]
-#[ignore = "needs the ingest slice's arxiv id parser — un-ignore once merged"]
 fn show_unknown_paper_exits_2() {
     let dir = tempfile::tempdir().unwrap();
     kb(dir.path())
@@ -68,7 +67,6 @@ fn show_unknown_paper_exits_2() {
 }
 
 #[test]
-#[ignore = "needs the ingest slice's arxiv id parser — un-ignore once merged"]
 fn add_garbage_id_exits_1() {
     let dir = tempfile::tempdir().unwrap();
     kb(dir.path())
