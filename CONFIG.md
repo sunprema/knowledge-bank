@@ -116,10 +116,41 @@ sync guarantees and per-OS builds of the binary.
 
 1. Install the binary: `cargo install --path /Volumes/x/kb`
    (release build → `~/.cargo/bin/kb`)
-2. Install pandoc: `brew install pandoc`
-3. `source` the env file (or add `KB_ROOT` to that machine's
+2. `source` the env file (or add `KB_ROOT` to that machine's
    `~/.zshrc`). macOS mounts named volumes at the same path, so
    `/Volumes/x/arxiv-kb` is stable across machines.
+
+Pandoc is NOT needed per machine — it lives on the drive (next
+section).
+
+### Pandoc travels on the drive
+
+The KB's `config.toml` (itself on the drive) points `pandoc_path` at a
+drive-resident copy, so a fresh Mac needs no `brew install pandoc`:
+
+```
+/Volumes/x/tools/
+├── pandoc                  # arch-dispatching wrapper (uname -m)
+└── pandoc-arm64/bin/pandoc # official 3.10 release binary
+```
+
+```toml
+[ingest]
+pandoc_path = "/Volumes/x/tools/pandoc"
+```
+
+Notes:
+- The **official release** binary is used, not a copy of brew's —
+  brew's links `libgmp` from `/opt/homebrew` and breaks on machines
+  without it; the official build depends only on system libraries.
+  Verified: ingest completes the LaTeX path with brew dirs stripped
+  from `PATH`.
+- The wrapper dispatches on `uname -m`. For an Intel Mac, download
+  `pandoc-<ver>-x86_64-macOS.zip` from the pandoc releases page and
+  unzip it to `/Volumes/x/tools/pandoc-x86_64/`.
+- Quarantine: after downloading a new binary onto the drive, run
+  `xattr -dr com.apple.quarantine /Volumes/x/tools/pandoc-<arch>`
+  once, or Gatekeeper will block it.
 
 ### MCP registration (per machine)
 
