@@ -124,15 +124,115 @@ pub async fn ingest_paper(
 
     ensure_notes_template(paths, &id, &meta.title)?;
 
+    index_and_report(paths, config, &id, &meta, t0, progress).await
+}
+
+/// `kb add --pdf` flow: ingest a local PDF with a filename-derived slug as
+/// its paper id. No arXiv round-trips — metadata is whatever the PDF's Info
+/// dictionary offers (title), with the filename as fallback.
+pub async fn ingest_local_pdf(
+    paths: &KbPaths,
+    config: &Config,
+    pdf_file: &Path,
+    progress: &dyn Fn(&str),
+) -> Result<IngestReport, KbError> {
+    let t0 = Instant::now();
+    let stem = pdf_file
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| {
+            KbError::Usage(format!("cannot derive an id from {}", pdf_file.display()))
+        })?;
+    let id = slug_from_filename(stem)?;
+
+    if paths.metadata_path(&id).exists() {
+        return Err(KbError::Usage(format!(
+            "{id} is already in the KB (run `kb remove {id}` first to re-ingest)"
+        )));
+    }
+
+    // Validate the source before touching the KB so a bad path leaves
+    // no half-created paper folder behind.
+    let bytes = pdf::read_local_pdf(pdf_file)?;
+
+    let paper_dir = paths.paper_dir(&id);
+    std::fs::create_dir_all(&paper_dir).map_err(|e| io_err("create paper folder", e))?;
+
+    progress("copying PDF into the KB");
+    pdf::write_pdf_atomic(&bytes, &paths.pdf_path(&id))?;
+
+    progress("extracting text from PDF");
+    write_sections_from_pdf(&paths.pdf_path(&id), &paths.sections_path(&id))?;
+
+    let title = pdf::extract_info_title(&paths.pdf_path(&id))
+        .unwrap_or_else(|| stem.replace(['-', '_'], " ").trim().to_string());
+
+    let meta = PaperMetadata {
+        arxiv_id: id.clone(),
+        version: None,
+        title,
+        authors: Vec::new(),
+        abstract_text: String::new(),
+        categories: Vec::new(),
+        published_at: String::new(),
+        updated_at: String::new(),
+        ingested_at: now_rfc3339(),
+        source_format: SourceFormat::Pdf,
+        main_tex: None,
+        tags: Vec::new(),
+        schema_version: crate::SCHEMA_VERSION,
+    };
+    meta.save(&paths.metadata_path(&id))?;
+
+    ensure_notes_template(paths, &id, &meta.title)?;
+
+    index_and_report(paths, config, &id, &meta, t0, progress).await
+}
+
+/// Filename stem → paper id for local PDFs: lowercase ASCII alphanumerics,
+/// every other run of characters collapsed to a single hyphen.
+/// "Attention Is All You Need.pdf" → "attention-is-all-you-need". Dots
+/// become hyphens, so a slug can never collide with the arXiv id namespace.
+pub fn slug_from_filename(stem: &str) -> Result<String, KbError> {
+    let mut slug = String::with_capacity(stem.len());
+    for c in stem.chars() {
+        if c.is_ascii_alphanumeric() {
+            slug.push(c.to_ascii_lowercase());
+        } else if !slug.is_empty() && !slug.ends_with('-') {
+            slug.push('-');
+        }
+    }
+    while slug.ends_with('-') {
+        slug.pop();
+    }
+    if slug.is_empty() {
+        return Err(KbError::Usage(format!(
+            "cannot derive an id from '{stem}' (no ASCII letters or digits)"
+        )));
+    }
+    Ok(slug)
+}
+
+/// Shared tail of every full ingest: TOC → section chunks → embed →
+/// two-store commit → log + report. Assumes metadata.json, sections.md,
+/// notes.md and paper.pdf are already in place.
+async fn index_and_report(
+    paths: &KbPaths,
+    config: &Config,
+    id: &str,
+    meta: &PaperMetadata,
+    t0: Instant,
+    progress: &dyn Fn(&str),
+) -> Result<IngestReport, KbError> {
     progress("extracting PDF table of contents");
-    let toc = pdf::extract_toc(&paths.pdf_path(&id)).unwrap_or_else(|e| {
+    let toc = pdf::extract_toc(&paths.pdf_path(id)).unwrap_or_else(|e| {
         tracing::warn!("TOC extraction failed ({e}); deep links will be page-less");
         Vec::new()
     });
 
     progress("classifying sections");
-    let sections_md = std::fs::read_to_string(paths.sections_path(&id)).ok();
-    let notes_md = std::fs::read_to_string(paths.notes_path(&id)).ok();
+    let sections_md = std::fs::read_to_string(paths.sections_path(id)).ok();
+    let notes_md = std::fs::read_to_string(paths.notes_path(id)).ok();
     let chunks = sections::build_chunks(
         sections_md.as_deref(),
         &meta.abstract_text,
@@ -149,7 +249,7 @@ pub async fn ingest_paper(
         config.turbovec.bit_width,
     )?;
     let (n_chunks, cache_hits) = embed_and_commit(
-        paths, config, &db, &mut index, &id, &chunks, &pages, &toc, &meta.tags,
+        paths, config, &db, &mut index, id, &chunks, &pages, &toc, &meta.tags,
     )
     .await?;
 
@@ -160,11 +260,11 @@ pub async fn ingest_paper(
     );
 
     Ok(IngestReport {
-        paper_id: id,
-        title: meta.title,
+        paper_id: id.to_string(),
+        title: meta.title.clone(),
         chunks: n_chunks,
         cache_hits,
-        source_format,
+        source_format: meta.source_format,
         elapsed_secs: elapsed,
     })
 }
@@ -465,5 +565,52 @@ pub fn log_line(paths: &KbPaths, msg: &str) {
         .open(paths.log_path())
     {
         let _ = f.write_all(line.as_bytes());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn slug_basic() {
+        assert_eq!(
+            slug_from_filename("Attention Is All You Need").unwrap(),
+            "attention-is-all-you-need"
+        );
+    }
+
+    #[test]
+    fn slug_collapses_runs_and_trims() {
+        assert_eq!(
+            slug_from_filename("  my -- paper (v2)!.final ").unwrap(),
+            "my-paper-v2-final"
+        );
+        assert_eq!(slug_from_filename("_leading_underscore").unwrap(), "leading-underscore");
+    }
+
+    #[test]
+    fn slug_of_arxiv_like_name_leaves_arxiv_namespace() {
+        // A file named 2504.19874.pdf must not produce an id that parses
+        // as an arXiv id (the dot becomes a hyphen).
+        let slug = slug_from_filename("2504.19874").unwrap();
+        assert_eq!(slug, "2504-19874");
+        assert!(crate::ingest::arxiv::parse_arxiv_id(&slug).is_err());
+    }
+
+    #[test]
+    fn slug_with_no_alphanumerics_is_usage_error() {
+        for bad in ["", "---", "日本語", "(!)"] {
+            assert!(matches!(
+                slug_from_filename(bad).unwrap_err(),
+                KbError::Usage(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn slug_is_idempotent() {
+        let s = slug_from_filename("Attention Is All You Need").unwrap();
+        assert_eq!(slug_from_filename(&s).unwrap(), s);
     }
 }

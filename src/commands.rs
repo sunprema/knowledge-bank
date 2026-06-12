@@ -60,9 +60,20 @@ fn confirm(prompt: &str) -> Result<bool, KbError> {
     Ok(matches!(line.trim(), "y" | "Y" | "yes"))
 }
 
-/// Validate-and-normalize an id argument (accepts URLs too, like `kb add`).
+/// Validate-and-normalize an id argument: an arXiv id or URL (like
+/// `kb add`), or a local-PDF slug id (e.g. attention-is-all-you-need).
 fn canonical_id(input: &str) -> Result<String, KbError> {
-    Ok(arxiv::parse_arxiv_id(input)?.0)
+    if let Ok((id, _)) = arxiv::parse_arxiv_id(input) {
+        return Ok(id);
+    }
+    match pipeline::slug_from_filename(input) {
+        // Already-canonical slugs only; "My Paper" should not silently
+        // resolve to my-paper.
+        Ok(slug) if slug == input => Ok(slug),
+        _ => Err(KbError::Usage(format!(
+            "unrecognized paper id or URL: {input}"
+        ))),
+    }
 }
 
 fn require_paper(kb: &Kb, paper_id: &str) -> Result<PaperMetadata, KbError> {
@@ -83,21 +94,36 @@ pub fn init(kb: &Kb) -> Result<(), KbError> {
 }
 
 pub async fn add(kb: &Kb, id_or_url: Option<String>, pdf: Option<PathBuf>) -> Result<(), KbError> {
-    if pdf.is_some() {
-        return Err(planned("add --pdf", "v0.2"));
+    match (id_or_url, pdf) {
+        (Some(_), Some(_)) => Err(KbError::Usage(
+            "pass an arXiv id/URL or --pdf <file>, not both".to_string(),
+        )),
+        (Some(input), None) => run_ingest(kb, IngestInput::Arxiv { input, refetch: false }).await,
+        (None, Some(path)) => run_ingest(kb, IngestInput::LocalPdf(path)).await,
+        (None, None) => Err(KbError::Usage(
+            "usage: kb add <arxiv-id-or-url> | kb add --pdf <file.pdf>".to_string(),
+        )),
     }
-    let input = id_or_url
-        .ok_or_else(|| KbError::Usage("usage: kb add <arxiv-id-or-url>".to_string()))?;
-    run_ingest(kb, &input, false).await
 }
 
 pub async fn update(kb: &Kb, arxiv_id: String) -> Result<(), KbError> {
     let id = canonical_id(&arxiv_id)?;
     require_paper(kb, &id)?;
-    run_ingest(kb, &id, true).await
+    if arxiv::parse_arxiv_id(&id).is_err() {
+        return Err(KbError::Usage(format!(
+            "{id} was ingested from a local PDF and has nothing to re-fetch; \
+             `kb remove {id}` and `kb add --pdf <file>` again"
+        )));
+    }
+    run_ingest(kb, IngestInput::Arxiv { input: id, refetch: true }).await
 }
 
-async fn run_ingest(kb: &Kb, input: &str, refetch: bool) -> Result<(), KbError> {
+enum IngestInput {
+    Arxiv { input: String, refetch: bool },
+    LocalPdf(PathBuf),
+}
+
+async fn run_ingest(kb: &Kb, job: IngestInput) -> Result<(), KbError> {
     let spinner = if kb.format == OutputFormat::Pretty {
         let s = indicatif::ProgressBar::new_spinner();
         s.enable_steady_tick(std::time::Duration::from_millis(120));
@@ -112,7 +138,14 @@ async fn run_ingest(kb: &Kb, input: &str, refetch: bool) -> Result<(), KbError> 
             eprintln!("… {msg}");
         }
     };
-    let report = pipeline::ingest_paper(&kb.paths, &kb.config, input, refetch, &progress).await;
+    let report = match &job {
+        IngestInput::Arxiv { input, refetch } => {
+            pipeline::ingest_paper(&kb.paths, &kb.config, input, *refetch, &progress).await
+        }
+        IngestInput::LocalPdf(path) => {
+            pipeline::ingest_local_pdf(&kb.paths, &kb.config, path, &progress).await
+        }
+    };
     if let Some(s) = &spinner {
         s.finish_and_clear();
     }

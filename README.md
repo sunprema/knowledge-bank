@@ -33,6 +33,7 @@ Every command accepts `--root <path>` (or `KB_ROOT`) and
 ```bash
 kb add 2504.19874
 kb add https://arxiv.org/abs/2504.19874     # URLs work too
+kb add --pdf "Attention Is All You Need.pdf"   # any local PDF
 ```
 
 `kb add` does the whole ingest in one shot (~15-20s): fetches metadata
@@ -41,6 +42,14 @@ the LaTeX to markdown via pandoc, classifies it into typed sections
 (abstract, method, limitations, future_work, …), embeds each section
 separately, and indexes them. Papers without LaTeX fall back to PDF
 text extraction. It also creates a `notes.md` template for you.
+
+`kb add --pdf` ingests a PDF that isn't on arXiv. Its id is the
+slugified filename (`Attention Is All You Need.pdf` →
+`attention-is-all-you-need`) and works everywhere an arXiv id does
+(`kb note`, `kb tag`, `kb show`, `kb open`, …). The title comes from
+the PDF's own metadata when present, else from the filename; there's
+no arXiv metadata to fetch, so `kb update` doesn't apply — re-add the
+file after `kb remove` if it changes.
 
 ```bash
 kb update 2504.19874     # re-fetch (paper got a new arXiv version); keeps your tags

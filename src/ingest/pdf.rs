@@ -39,18 +39,55 @@ pub async fn download_pdf(
             "arXiv returned a non-PDF payload for {arxiv_id}"
         )));
     }
+    write_pdf_atomic(&bytes, dest)
+}
 
+/// Read a local PDF for ingestion. A missing/unreadable path ⇒ `NotFound`;
+/// a payload that isn't `%PDF` ⇒ `Extraction`.
+pub fn read_local_pdf(src: &Path) -> Result<Vec<u8>, KbError> {
+    let bytes = std::fs::read(src)
+        .map_err(|e| KbError::NotFound(format!("cannot read {}: {e}", src.display())))?;
+    if !bytes.starts_with(b"%PDF") {
+        return Err(KbError::Extraction(format!(
+            "{} is not a PDF",
+            src.display()
+        )));
+    }
+    Ok(bytes)
+}
+
+/// Write `paper.pdf` atomically (temp file then rename).
+pub(crate) fn write_pdf_atomic(bytes: &[u8], dest: &Path) -> Result<(), KbError> {
     let dir = dest.parent().filter(|p| !p.as_os_str().is_empty());
     let mut tmp = match dir {
         Some(d) => tempfile::NamedTempFile::new_in(d),
         None => tempfile::NamedTempFile::new(),
     }
     .map_err(|e| KbError::Index(format!("create temp file for paper.pdf: {e}")))?;
-    std::io::Write::write_all(&mut tmp, &bytes)
+    std::io::Write::write_all(&mut tmp, bytes)
         .map_err(|e| KbError::Index(format!("write paper.pdf: {e}")))?;
     tmp.persist(dest)
         .map_err(|e| KbError::Index(format!("rename into {}: {e}", dest.display())))?;
     Ok(())
+}
+
+/// The document's Info-dictionary `/Title`, whitespace-normalized, if
+/// present and non-empty. Any parse trouble is a `None` — callers have a
+/// filename to fall back on.
+pub fn extract_info_title(pdf_path: &Path) -> Option<String> {
+    let doc = Document::load(pdf_path).ok()?;
+    let info = resolve_dict(&doc, doc.trailer.get(b"Info").ok()?)?;
+    let title_obj = resolve_object(&doc, info.get(b"Title").ok()?)?;
+    let title = lopdf::decode_text_string(&title_obj)
+        .ok()
+        .or_else(|| {
+            title_obj
+                .as_str()
+                .ok()
+                .map(|b| String::from_utf8_lossy(b).into_owned())
+        })?;
+    let title = title.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!title.is_empty()).then_some(title)
 }
 
 /// Extract the PDF outline as a flat list (depth-first order), with

@@ -39,11 +39,12 @@ enum FormatArg {
 enum Command {
     /// Initialize the KB root folder and default config
     Init,
-    /// Ingest a paper by arXiv id or URL
+    /// Ingest a paper by arXiv id or URL, or a local PDF via --pdf
     Add {
         /// arXiv id or URL (e.g. 2504.19874, https://arxiv.org/abs/2504.19874)
         id_or_url: Option<String>,
-        /// Ingest a local PDF instead (no LaTeX path)
+        /// Ingest a local PDF instead; its id is the slugified filename
+        /// (My Paper.pdf → my-paper)
         #[arg(long)]
         pdf: Option<PathBuf>,
     },
