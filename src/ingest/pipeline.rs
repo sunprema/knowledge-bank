@@ -64,10 +64,10 @@ pub async fn ingest_paper(
 
     progress("fetching metadata from arXiv");
     let mut meta = arxiv::fetch_metadata(&client, &id).await?;
-    if refetch {
-        if let Ok(old) = PaperMetadata::load(&paths.metadata_path(&id)) {
-            meta.tags = old.tags; // tags are user-owned; survive re-fetch
-        }
+    if refetch
+        && let Ok(old) = PaperMetadata::load(&paths.metadata_path(&id))
+    {
+        meta.tags = old.tags; // tags are user-owned; survive re-fetch
     }
 
     let paper_dir = paths.paper_dir(&id);

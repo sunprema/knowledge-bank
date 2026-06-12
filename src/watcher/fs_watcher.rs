@@ -47,14 +47,14 @@ pub async fn run(paths: KbPaths, config: Config) -> Result<(), KbError> {
 
     // A long-running writer must not mix incompatible vectors into the
     // index (resolved config-drift decision).
-    if let Some(stored) = db.meta_get("vector_fingerprint")? {
-        if stored != config.vector_fingerprint() {
-            return Err(KbError::Index(format!(
-                "embedding/index config changed ({} → {}) — run `kb reindex` before watching",
-                stored,
-                config.vector_fingerprint()
-            )));
-        }
+    if let Some(stored) = db.meta_get("vector_fingerprint")?
+        && stored != config.vector_fingerprint()
+    {
+        return Err(KbError::Index(format!(
+            "embedding/index config changed ({} → {}) — run `kb reindex` before watching",
+            stored,
+            config.vector_fingerprint()
+        )));
     }
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<notify::Event>();

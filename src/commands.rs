@@ -301,10 +301,10 @@ pub fn list(kb: &Kb, tag: Option<String>) -> Result<(), KbError> {
                 continue;
             }
         };
-        if let Some(t) = &tag {
-            if !meta.tags.iter().any(|x| x == t) {
-                continue;
-            }
+        if let Some(t) = &tag
+            && !meta.tags.iter().any(|x| x == t)
+        {
+            continue;
         }
         rows.push(meta);
     }

@@ -251,10 +251,11 @@ impl KbPaths {
         };
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.is_dir() && path.join("metadata.json").exists() {
-                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                    ids.push(name.to_string());
-                }
+            if path.is_dir()
+                && path.join("metadata.json").exists()
+                && let Some(name) = path.file_name().and_then(|n| n.to_str())
+            {
+                ids.push(name.to_string());
             }
         }
         ids.sort();

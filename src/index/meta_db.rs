@@ -178,6 +178,9 @@ impl MetaDb {
         // journal_mode returns a row ("wal"); use query_row, not execute.
         conn.query_row("PRAGMA journal_mode=WAL", [], |_| Ok(()))?;
         conn.execute_batch("PRAGMA foreign_keys=ON;")?;
+        // Watcher + MCP server may write concurrently (addendum §10);
+        // wait briefly instead of failing with SQLITE_BUSY.
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.execute_batch(PERSISTENT_SCHEMA)?;
         conn.execute_batch(DERIVED_SCHEMA)?;
 

@@ -127,23 +127,23 @@ pub fn open_stores_for_query(
         )));
     }
 
-    if let Some(stored) = db.meta_get("vector_fingerprint")? {
-        if stored != config.vector_fingerprint() {
-            return Err(KbError::Index(format!(
-                "embedding/index config changed ({} → {}) — existing vectors are unusable; run `kb reindex`",
-                stored,
-                config.vector_fingerprint()
-            )));
-        }
+    if let Some(stored) = db.meta_get("vector_fingerprint")?
+        && stored != config.vector_fingerprint()
+    {
+        return Err(KbError::Index(format!(
+            "embedding/index config changed ({} → {}) — existing vectors are unusable; run `kb reindex`",
+            stored,
+            config.vector_fingerprint()
+        )));
     }
-    if let Some(stored) = db.meta_get("chunking_fingerprint")? {
-        if stored != config.chunking_fingerprint() {
-            eprintln!(
-                "warning: chunking config changed ({} → {}); results reflect the old chunking until you run `kb reindex`",
-                stored,
-                config.chunking_fingerprint()
-            );
-        }
+    if let Some(stored) = db.meta_get("chunking_fingerprint")?
+        && stored != config.chunking_fingerprint()
+    {
+        eprintln!(
+            "warning: chunking config changed ({} → {}); results reflect the old chunking until you run `kb reindex`",
+            stored,
+            config.chunking_fingerprint()
+        );
     }
 
     Ok((db, index))
