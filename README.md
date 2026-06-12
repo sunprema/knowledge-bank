@@ -8,6 +8,8 @@ source PDF.
 
 Full design: [KB_PROD_REQUIREMENTS.md](./KB_PROD_REQUIREMENTS.md) and
 [KB_PERSISTENCE_ADDENDUM.md](./KB_PERSISTENCE_ADDENDUM.md).
+Configuration, env vars, and the portable USB-drive setup:
+[CONFIG.md](./CONFIG.md).
 
 ## Setup
 
