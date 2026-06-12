@@ -2,7 +2,7 @@
 //! embedding cache, and a small meta KV (schema version, config
 //! fingerprints). See PRD §4 steps 5/8 and addendum §9.
 
-use crate::{ChunkRecord, KbError, SCHEMA_VERSION, SectionType, TocEntry};
+use crate::{ChunkRecord, DocKind, KbError, SCHEMA_VERSION, SectionType, TocEntry};
 use rusqlite::OptionalExtension;
 use std::path::Path;
 
@@ -72,6 +72,12 @@ CREATE TABLE IF NOT EXISTS paper_tags (
   paper_id TEXT NOT NULL,
   tag      TEXT NOT NULL,
   PRIMARY KEY (paper_id, tag)
+);
+
+CREATE TABLE IF NOT EXISTS documents (
+  paper_id TEXT PRIMARY KEY,
+  kind     TEXT NOT NULL,
+  project  TEXT
 );
 ";
 
@@ -160,6 +166,12 @@ impl MetaDb {
     ///   paper_id TEXT NOT NULL,
     ///   tag      TEXT NOT NULL,
     ///   PRIMARY KEY (paper_id, tag)
+    /// );
+    ///
+    /// CREATE TABLE documents (
+    ///   paper_id TEXT PRIMARY KEY,
+    ///   kind     TEXT NOT NULL,   -- 'paper' | 'note'
+    ///   project  TEXT             -- notes only
     /// );
     ///
     /// CREATE TABLE embedding_cache (
@@ -311,16 +323,23 @@ impl MetaDb {
     /// Vector ids matching ALL provided filters (each filter is OR within
     /// itself, AND across filters) — the allowlist source for filtered
     /// search (PRD §5). `None` filters are ignored; all-None ⇒ every id.
+    ///
+    /// `kind`/`projects` filter via the `documents` mirror. Chunks indexed
+    /// before that table existed have no row, so kind matching treats a
+    /// missing row as `paper` (only `kb idea add` writes notes).
     pub fn vector_ids_filtered(
         &self,
         section_types: Option<&[SectionType]>,
         paper_ids: Option<&[String]>,
         tags: Option<&[String]>,
+        kind: Option<DocKind>,
+        projects: Option<&[String]>,
     ) -> Result<Vec<i64>, KbError> {
         // A provided-but-empty filter can match nothing (OR of zero terms).
         if section_types.is_some_and(|s| s.is_empty())
             || paper_ids.is_some_and(|p| p.is_empty())
             || tags.is_some_and(|t| t.is_empty())
+            || projects.is_some_and(|p| p.is_empty())
         {
             return Ok(Vec::new());
         }
@@ -334,6 +353,19 @@ impl MetaDb {
             clauses.push(format!("pt.tag IN ({})", placeholders(tags.len())));
             for t in tags {
                 params.push(Box::new(t.clone()));
+            }
+        }
+        if kind.is_some() || projects.is_some() {
+            sql.push_str(" LEFT JOIN documents d ON d.paper_id = c.paper_id");
+        }
+        if let Some(kind) = kind {
+            clauses.push("COALESCE(d.kind, 'paper') = ?".to_string());
+            params.push(Box::new(kind.as_str()));
+        }
+        if let Some(projects) = projects {
+            clauses.push(format!("d.project IN ({})", placeholders(projects.len())));
+            for p in projects {
+                params.push(Box::new(p.clone()));
             }
         }
         if let Some(sections) = section_types {
@@ -410,6 +442,22 @@ impl MetaDb {
         Ok(())
     }
 
+    // ---- documents mirror (canonical copy lives in metadata.json) ----
+
+    /// Upsert one document's kind/project mirror row.
+    pub fn set_document(
+        &self,
+        paper_id: &str,
+        kind: DocKind,
+        project: Option<&str>,
+    ) -> Result<(), KbError> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO documents (paper_id, kind, project) VALUES (?1, ?2, ?3)",
+            rusqlite::params![paper_id, kind.as_str(), project],
+        )?;
+        Ok(())
+    }
+
     // ---- embedding cache (addendum §9) ----
 
     pub fn cache_get(
@@ -482,24 +530,28 @@ impl MetaDb {
 
     // ---- paper-level cleanup ----
 
-    /// Remove every trace of a paper (chunks + toc + tags). Returns the
-    /// removed vector ids.
+    /// Remove every trace of a paper (chunks + toc + tags + document row).
+    /// Returns the removed vector ids.
     pub fn remove_paper(&self, paper_id: &str) -> Result<Vec<i64>, KbError> {
         let ids = self.delete_chunks_for_paper(paper_id)?;
         self.conn
             .execute("DELETE FROM pdf_toc WHERE paper_id = ?1", [paper_id])?;
         self.conn
             .execute("DELETE FROM paper_tags WHERE paper_id = ?1", [paper_id])?;
+        self.conn
+            .execute("DELETE FROM documents WHERE paper_id = ?1", [paper_id])?;
         Ok(ids)
     }
 
-    /// Drop and recreate the chunks/pdf_toc/paper_tags tables (NOT the
-    /// embedding cache — surviving reindex is its whole point, addendum §8).
+    /// Drop and recreate the chunks/pdf_toc/paper_tags/documents tables
+    /// (NOT the embedding cache — surviving reindex is its whole point,
+    /// addendum §8).
     pub fn reset_derived_tables(&self) -> Result<(), KbError> {
         self.conn.execute_batch(
             "DROP TABLE IF EXISTS chunks; \
              DROP TABLE IF EXISTS pdf_toc; \
-             DROP TABLE IF EXISTS paper_tags;",
+             DROP TABLE IF EXISTS paper_tags; \
+             DROP TABLE IF EXISTS documents;",
         )?;
         self.conn.execute_batch(DERIVED_SCHEMA)?;
         Ok(())
@@ -738,30 +790,30 @@ mod tests {
         db.set_tags("p2", &["vision".into()]).unwrap();
 
         // All-None ⇒ every id.
-        assert_eq!(db.vector_ids_filtered(None, None, None).unwrap(), vec![a, b, c, d]);
+        assert_eq!(db.vector_ids_filtered(None, None, None, None, None).unwrap(), vec![a, b, c, d]);
 
         // Single section filter.
         assert_eq!(
-            db.vector_ids_filtered(Some(&[SectionType::Method]), None, None).unwrap(),
+            db.vector_ids_filtered(Some(&[SectionType::Method]), None, None, None, None).unwrap(),
             vec![b, c]
         );
 
         // OR within a filter: two sections.
         assert_eq!(
-            db.vector_ids_filtered(Some(&[SectionType::Abstract, SectionType::Conclusion]), None, None)
+            db.vector_ids_filtered(Some(&[SectionType::Abstract, SectionType::Conclusion]), None, None, None, None)
                 .unwrap(),
             vec![a, d]
         );
 
         // Paper filter.
         assert_eq!(
-            db.vector_ids_filtered(None, Some(&["p1".to_string()]), None).unwrap(),
+            db.vector_ids_filtered(None, Some(&["p1".to_string()]), None, None, None).unwrap(),
             vec![a, b]
         );
 
         // Tags join through paper_tags; OR within tags.
         assert_eq!(
-            db.vector_ids_filtered(None, None, Some(&["nlp".to_string(), "vision".to_string()]))
+            db.vector_ids_filtered(None, None, Some(&["nlp".to_string(), "vision".to_string()]), None, None)
                 .unwrap(),
             vec![a, b, c]
         );
@@ -772,7 +824,7 @@ mod tests {
                 Some(&[SectionType::Method]),
                 None,
                 Some(&["nlp".to_string()])
-            )
+            , None, None)
             .unwrap(),
             vec![b]
         );
@@ -783,20 +835,99 @@ mod tests {
                 Some(&[SectionType::Method, SectionType::Abstract]),
                 Some(&["p1".to_string(), "p2".to_string()]),
                 Some(&["transformers".to_string()])
-            )
+            , None, None)
             .unwrap(),
             vec![a, b]
         );
 
         // A provided-but-empty filter matches nothing.
-        assert!(db.vector_ids_filtered(Some(&[]), None, None).unwrap().is_empty());
-        assert!(db.vector_ids_filtered(None, None, Some(&[])).unwrap().is_empty());
+        assert!(db.vector_ids_filtered(Some(&[]), None, None, None, None).unwrap().is_empty());
+        assert!(db.vector_ids_filtered(None, None, Some(&[]), None, None).unwrap().is_empty());
 
         // No duplicate ids when a paper has multiple matching tags.
         let both = db
-            .vector_ids_filtered(None, None, Some(&["nlp".to_string(), "transformers".to_string()]))
+            .vector_ids_filtered(None, None, Some(&["nlp".to_string(), "transformers".to_string()]), None, None)
             .unwrap();
         assert_eq!(both, vec![a, b], "DISTINCT must dedupe the tag join");
+    }
+
+    #[test]
+    fn vector_ids_filtered_by_kind_and_project() {
+        let (_dir, db) = open_temp();
+        let paper = db.insert_chunk(&new_chunk("p1", SectionType::Method, 0, "a")).unwrap();
+        let idea1 = db.insert_chunk(&new_chunk("idea-one", SectionType::Other, 0, "b")).unwrap();
+        let idea2 = db.insert_chunk(&new_chunk("idea-two", SectionType::Other, 0, "c")).unwrap();
+        // Legacy chunk with NO documents row — must behave as kind=paper.
+        let legacy = db.insert_chunk(&new_chunk("p0", SectionType::Abstract, 0, "d")).unwrap();
+        db.set_document("p1", DocKind::Paper, None).unwrap();
+        db.set_document("idea-one", DocKind::Note, Some("kitgig")).unwrap();
+        db.set_document("idea-two", DocKind::Note, Some("global")).unwrap();
+
+        // Kind filters; missing documents row counts as paper.
+        assert_eq!(
+            db.vector_ids_filtered(None, None, None, Some(DocKind::Paper), None).unwrap(),
+            vec![paper, legacy]
+        );
+        assert_eq!(
+            db.vector_ids_filtered(None, None, None, Some(DocKind::Note), None).unwrap(),
+            vec![idea1, idea2]
+        );
+
+        // Project list = OR (the ["kitgig","global"] cross-project query).
+        assert_eq!(
+            db.vector_ids_filtered(
+                None, None, None, None,
+                Some(&["kitgig".to_string(), "global".to_string()])
+            )
+            .unwrap(),
+            vec![idea1, idea2]
+        );
+        assert_eq!(
+            db.vector_ids_filtered(None, None, None, None, Some(&["kitgig".to_string()]))
+                .unwrap(),
+            vec![idea1]
+        );
+
+        // AND across filters: note-kind AND project.
+        assert_eq!(
+            db.vector_ids_filtered(
+                None, None, None,
+                Some(DocKind::Note),
+                Some(&["global".to_string()])
+            )
+            .unwrap(),
+            vec![idea2]
+        );
+
+        // Empty project list matches nothing.
+        assert!(db.vector_ids_filtered(None, None, None, None, Some(&[])).unwrap().is_empty());
+    }
+
+    #[test]
+    fn set_document_upserts_and_remove_paper_wipes_it() {
+        let (_dir, db) = open_temp();
+        let id = db.insert_chunk(&new_chunk("idea-x", SectionType::Other, 0, "a")).unwrap();
+        db.set_document("idea-x", DocKind::Note, Some("alpha")).unwrap();
+        db.set_document("idea-x", DocKind::Note, Some("beta")).unwrap(); // upsert
+        assert!(
+            db.vector_ids_filtered(None, None, None, None, Some(&["alpha".to_string()]))
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            db.vector_ids_filtered(None, None, None, None, Some(&["beta".to_string()]))
+                .unwrap(),
+            vec![id]
+        );
+
+        db.remove_paper("idea-x").unwrap();
+        // Row gone: with no documents row left, nothing matches the project.
+        db.insert_chunk(&new_chunk("idea-x", SectionType::Other, 1, "back")).unwrap();
+        assert!(
+            db.vector_ids_filtered(None, None, None, None, Some(&["beta".to_string()]))
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -823,10 +954,10 @@ mod tests {
         db.set_tags("p1", &["old".into()]).unwrap();
         db.set_tags("p1", &["new".into()]).unwrap();
         assert!(
-            db.vector_ids_filtered(None, None, Some(&["old".to_string()])).unwrap().is_empty()
+            db.vector_ids_filtered(None, None, Some(&["old".to_string()]), None, None).unwrap().is_empty()
         );
         assert_eq!(
-            db.vector_ids_filtered(None, None, Some(&["new".to_string()])).unwrap(),
+            db.vector_ids_filtered(None, None, Some(&["new".to_string()]), None, None).unwrap(),
             vec![id]
         );
     }
@@ -904,7 +1035,7 @@ mod tests {
         assert_eq!(removed, vec![a]);
         assert!(db.chunks_for_paper("p1").unwrap().is_empty());
         assert!(db.toc_for_paper("p1").unwrap().is_empty());
-        assert!(db.vector_ids_filtered(None, None, Some(&["t".to_string()])).unwrap().is_empty());
+        assert!(db.vector_ids_filtered(None, None, Some(&["t".to_string()]), None, None).unwrap().is_empty());
         assert_eq!(db.all_vector_ids().unwrap(), vec![keep]);
     }
 
@@ -923,7 +1054,7 @@ mod tests {
         // Derived tables empty but usable.
         assert_eq!(db.chunk_count().unwrap(), 0);
         assert!(db.toc_for_paper("p1").unwrap().is_empty());
-        assert!(db.vector_ids_filtered(None, None, Some(&["tag".to_string()])).unwrap().is_empty());
+        assert!(db.vector_ids_filtered(None, None, Some(&["tag".to_string()]), None, None).unwrap().is_empty());
         let id = db.insert_chunk(&new_chunk("p1", SectionType::Abstract, 0, "a")).unwrap();
         assert_eq!(id, 1, "autoincrement restarts after drop — fresh reindex ids");
 

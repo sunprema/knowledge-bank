@@ -186,6 +186,9 @@ pub fn parse_atom_metadata(xml: &str, arxiv_id: &str) -> Result<PaperMetadata, K
 
     Ok(PaperMetadata {
         arxiv_id: arxiv_id.to_string(),
+        kind: crate::DocKind::Paper,
+        project: None,
+        links: Vec::new(),
         version,
         title,
         authors,
@@ -195,6 +198,7 @@ pub fn parse_atom_metadata(xml: &str, arxiv_id: &str) -> Result<PaperMetadata, K
         updated_at: child_text("updated").unwrap_or_default().trim().to_string(),
         ingested_at: now_rfc3339(),
         source_format: SourceFormat::Latex,
+        source_url: None,
         main_tex: None,
         tags: Vec::new(),
         schema_version: SCHEMA_VERSION,

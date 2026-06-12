@@ -13,7 +13,7 @@ use crate::ingest::pipeline::{self, index_paper_from_disk, log_line};
 use crate::KbError;
 use notify::{EventKind, RecursiveMode, Watcher};
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 pub async fn run(paths: KbPaths, config: Config) -> Result<(), KbError> {
@@ -68,6 +68,11 @@ pub async fn run(paths: KbPaths, config: Config) -> Result<(), KbError> {
         .watch(&paths.root, RecursiveMode::Recursive)
         .map_err(|e| KbError::Index(format!("watch {}: {e}", paths.root.display())))?;
 
+    // Event paths arrive fully resolved (on macOS, FSEvents canonicalizes
+    // `/var` → `/private/var`), so compare them against the canonical root,
+    // not the possibly-symlinked configured path.
+    let canon_root = std::fs::canonicalize(&paths.root).unwrap_or_else(|_| paths.root.clone());
+
     log_line(
         &paths,
         &format!("watcher started, monitoring {}", paths.root.display()),
@@ -82,6 +87,22 @@ pub async fn run(paths: KbPaths, config: Config) -> Result<(), KbError> {
         }
     }
 
+    // Inbox: a drop-folder for raw files. Create it (so it's discoverable)
+    // and catch up on anything dropped while no watcher was running.
+    let mut inbox_pending: HashSet<PathBuf> = HashSet::new();
+    let canon_inbox = std::fs::canonicalize(paths.inbox_dir()).unwrap_or_else(|_| canon_root.join("inbox"));
+    let canon_failed = canon_inbox.join("failed");
+    if config.watcher.inbox_enabled {
+        std::fs::create_dir_all(paths.inbox_dir())
+            .map_err(|e| KbError::Index(format!("create inbox: {e}")))?;
+        for entry in std::fs::read_dir(paths.inbox_dir()).into_iter().flatten().flatten() {
+            let p = entry.path();
+            if p.is_file() {
+                inbox_pending.insert(p);
+            }
+        }
+    }
+
     let debounce = Duration::from_millis(config.watcher.debounce_ms);
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .map_err(|e| KbError::Index(format!("signal handler: {e}")))?;
@@ -91,7 +112,12 @@ pub async fn run(paths: KbPaths, config: Config) -> Result<(), KbError> {
             ev = rx.recv() => {
                 match ev {
                     Some(ev) => {
-                        for paper_id in papers_affected(&paths.root, &ev) {
+                        if config.watcher.inbox_enabled {
+                            for file in inbox_files_affected(&canon_inbox, &canon_failed, &ev) {
+                                inbox_pending.insert(file);
+                            }
+                        }
+                        for paper_id in papers_affected(&canon_root, &ev) {
                             pending.insert(paper_id);
                         }
                     }
@@ -100,10 +126,16 @@ pub async fn run(paths: KbPaths, config: Config) -> Result<(), KbError> {
             }
             // Recreated each iteration ⇒ fires only after `debounce` of
             // quiet (every new event restarts the wait). PRD §9: a save
-            // followed by another within 2s triggers one re-embed.
-            _ = tokio::time::sleep(debounce), if !pending.is_empty() => {
-                let batch: Vec<String> = pending.drain().collect();
-                for paper_id in batch {
+            // followed by another within 2s triggers one re-embed. A file
+            // still being copied into the inbox keeps the timer resetting,
+            // so we only ingest once the copy settles.
+            _ = tokio::time::sleep(debounce), if !pending.is_empty() || !inbox_pending.is_empty() => {
+                // Inbox first: materializing a dropped file enqueues its new
+                // paper id into `pending`, so it indexes in this same pass.
+                for file in inbox_pending.drain().collect::<Vec<_>>() {
+                    process_inbox_file(&paths, &mut pending, &file).await;
+                }
+                for paper_id in pending.drain().collect::<Vec<_>>() {
                     sync_paper(&paths, &config, &db, &mut index, &paper_id).await;
                 }
             }
@@ -113,6 +145,9 @@ pub async fn run(paths: KbPaths, config: Config) -> Result<(), KbError> {
     }
 
     // Flush in-flight work, save, exit (PRD §14 shutdown row).
+    for file in inbox_pending.drain().collect::<Vec<_>>() {
+        process_inbox_file(&paths, &mut pending, &file).await;
+    }
     if !pending.is_empty() {
         let batch: Vec<String> = pending.drain().collect();
         for paper_id in batch {
@@ -132,14 +167,14 @@ impl Drop for PidGuard {
 }
 
 /// Map one notify event to the paper folders it affects. Only content
-/// files matter (notes.md / sections.md / metadata.json) — PDF and
-/// source/ churn is ignored (PRD §14: PDFs aren't the source of truth
+/// files matter (notes.md / sections.md / metadata.json / idea.md) — PDF
+/// and source/ churn is ignored (PRD §14: PDFs aren't the source of truth
 /// for content). Removal events always count (folder deletion).
 fn papers_affected(root: &Path, ev: &notify::Event) -> Vec<String> {
     let interesting_file = |p: &Path| {
         matches!(
             p.file_name().and_then(|n| n.to_str()),
-            Some("notes.md") | Some("sections.md") | Some("metadata.json")
+            Some("notes.md") | Some("sections.md") | Some("metadata.json") | Some("idea.md")
         )
     };
     let is_removal = matches!(ev.kind, EventKind::Remove(_));
@@ -149,7 +184,8 @@ fn papers_affected(root: &Path, ev: &notify::Event) -> Vec<String> {
         let Ok(rel) = path.strip_prefix(root) else { continue };
         let Some(first) = rel.components().next() else { continue };
         let folder = first.as_os_str().to_string_lossy();
-        if folder == ".arxiv-kb" || folder.starts_with('.') {
+        // `inbox` is the drop-folder, not a paper (handled separately).
+        if folder == ".arxiv-kb" || folder == "inbox" || folder.starts_with('.') {
             continue;
         }
         // rel == just the folder (dir-level event) or a file inside it.
@@ -159,6 +195,113 @@ fn papers_affected(root: &Path, ev: &notify::Event) -> Vec<String> {
         }
     }
     out
+}
+
+/// Files dropped directly into `inbox/` (not `inbox/failed/`). Removal
+/// events are ignored — we react to files that exist, not ones that left.
+/// `inbox`/`failed` must be canonical so they match resolved event paths.
+fn inbox_files_affected(inbox: &Path, failed: &Path, ev: &notify::Event) -> Vec<PathBuf> {
+    if matches!(ev.kind, EventKind::Remove(_)) {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for path in &ev.paths {
+        // Direct child of inbox/, a regular file, not under failed/.
+        if path.parent() == Some(inbox) && !path.starts_with(failed) && path.is_file() {
+            out.push(path.clone());
+        }
+    }
+    out
+}
+
+/// Ingest one dropped inbox file, then delete it (success) or move it to
+/// `inbox/failed/` (error). Only the canonical folder is written here; the
+/// new paper id is queued in `pending` so the caller's long-lived index
+/// embeds it. Dispatch is by extension: `.pdf` → local-PDF ingest;
+/// `.url`/`.txt` → one URL per line. Other extensions are left untouched
+/// (likely a temp or partial file). All failures are logged, never fatal.
+async fn process_inbox_file(paths: &KbPaths, pending: &mut HashSet<String>, path: &Path) {
+    if !path.is_file() {
+        return; // already consumed by an earlier event in this batch
+    }
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase());
+
+    match ext.as_deref() {
+        Some("pdf") => {
+            match pipeline::materialize_local_pdf(paths, path, &|_| {}) {
+                Ok(id) => {
+                    log_line(paths, &format!("inbox: ingested PDF {} as {id}", display(path)));
+                    pending.insert(id);
+                    consume_inbox_file(paths, path);
+                }
+                Err(e) => {
+                    log_line(paths, &format!("inbox: PDF {} failed: {e}", display(path)));
+                    fail_inbox_file(paths, path);
+                }
+            }
+        }
+        Some("url") | Some("txt") => {
+            let Ok(content) = std::fs::read_to_string(path) else {
+                log_line(paths, &format!("inbox: cannot read {}", display(path)));
+                fail_inbox_file(paths, path);
+                return;
+            };
+            let urls = pipeline::parse_url_lines(&content);
+            if urls.is_empty() {
+                log_line(paths, &format!("inbox: no URLs in {}", display(path)));
+                fail_inbox_file(paths, path);
+                return;
+            }
+            let mut all_ok = true;
+            for url in urls {
+                match pipeline::materialize_url(paths, &url, false, &|_| {}).await {
+                    Ok(id) => {
+                        log_line(paths, &format!("inbox: ingested {url} as {id}"));
+                        pending.insert(id);
+                    }
+                    Err(e) => {
+                        all_ok = false;
+                        log_line(paths, &format!("inbox: URL {url} failed: {e}"));
+                    }
+                }
+            }
+            if all_ok {
+                consume_inbox_file(paths, path);
+            } else {
+                fail_inbox_file(paths, path);
+            }
+        }
+        _ => {} // unknown extension: leave it alone
+    }
+}
+
+fn display(path: &Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+/// Delete a successfully-ingested source file.
+fn consume_inbox_file(paths: &KbPaths, path: &Path) {
+    if let Err(e) = std::fs::remove_file(path) {
+        log_line(paths, &format!("inbox: could not delete {}: {e}", display(path)));
+    }
+}
+
+/// Park a file that failed to ingest under `inbox/failed/` so it isn't
+/// retried on every event and the user can inspect it.
+fn fail_inbox_file(paths: &KbPaths, path: &Path) {
+    let failed_dir = paths.inbox_failed_dir();
+    if std::fs::create_dir_all(&failed_dir).is_err() {
+        return; // best-effort; the file simply stays in inbox/
+    }
+    let dest = failed_dir.join(path.file_name().unwrap_or_default());
+    if let Err(e) = std::fs::rename(path, &dest) {
+        log_line(paths, &format!("inbox: could not move {} to failed/: {e}", display(path)));
+    }
 }
 
 /// State-driven sync: folder has metadata.json ⇒ (re)index from disk;

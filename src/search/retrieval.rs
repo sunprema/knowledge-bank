@@ -4,7 +4,7 @@
 use crate::config::{Config, KbPaths};
 use crate::embed::OpenAiEmbedder;
 use crate::index::{consistency_check, MetaDb, VectorIndex};
-use crate::{deep_link, KbError, PaperMetadata, SectionType};
+use crate::{deep_link, DocKind, KbError, PaperMetadata, SectionType};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -31,11 +31,20 @@ pub struct SearchFilters {
     pub section_types: Option<Vec<SectionType>>,
     pub paper_ids: Option<Vec<String>>,
     pub tags: Option<Vec<String>>,
+    /// `None` = both papers and notes.
+    pub kind: Option<DocKind>,
+    /// Restrict notes to these projects (OR). Typical agent query:
+    /// `[current_project, "global"]`.
+    pub projects: Option<Vec<String>>,
 }
 
 impl SearchFilters {
     pub fn is_empty(&self) -> bool {
-        self.section_types.is_none() && self.paper_ids.is_none() && self.tags.is_none()
+        self.section_types.is_none()
+            && self.paper_ids.is_none()
+            && self.tags.is_none()
+            && self.kind.is_none()
+            && self.projects.is_none()
     }
 }
 
@@ -53,6 +62,9 @@ pub struct ChunkHit {
 /// Paper metadata subset embedded in results.
 #[derive(Debug, Clone, Serialize)]
 pub struct PaperInfo {
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
     pub title: String,
     pub authors: Vec<String>,
     #[serde(rename = "abstract")]
@@ -180,6 +192,8 @@ pub async fn search(
             filters.section_types.as_deref(),
             filters.paper_ids.as_deref(),
             filters.tags.as_deref(),
+            filters.kind,
+            filters.projects.as_deref(),
         )?;
         if ids.is_empty() {
             return Ok(empty(mode));
@@ -222,14 +236,16 @@ pub async fn search(
             Some(s) => *s,
             None => continue,
         };
+        // Notes have no PDF; deep-link to the idea body instead.
         let pdf = paths.pdf_path(&rec.paper_id);
+        let target = if pdf.exists() { pdf } else { paths.idea_path(&rec.paper_id) };
         let hit = ChunkHit {
             chunk_id: rec.chunk_id.clone(),
             section_type: rec.section_type.as_str().to_string(),
             score,
             snippet: rec.snippet.clone(),
             page: rec.page,
-            deep_link: deep_link(&pdf, rec.page, None),
+            deep_link: deep_link(&target, rec.page, None),
         };
         total_chunks += 1;
 
@@ -244,6 +260,8 @@ pub async fn search(
                     matched_sections: Vec::new(),
                     chunks: Vec::new(),
                     paper: PaperInfo {
+                        kind: meta.kind.as_str().to_string(),
+                        project: meta.project,
                         title: meta.title,
                         authors: meta.authors,
                         abstract_text: meta.abstract_text,
@@ -281,6 +299,9 @@ pub async fn search(
 fn placeholder_meta(paper_id: &str) -> PaperMetadata {
     PaperMetadata {
         arxiv_id: paper_id.to_string(),
+        kind: DocKind::default(),
+        project: None,
+        links: Vec::new(),
         version: None,
         title: format!("(metadata.json unreadable for {paper_id})"),
         authors: Vec::new(),
@@ -290,6 +311,7 @@ fn placeholder_meta(paper_id: &str) -> PaperMetadata {
         updated_at: String::new(),
         ingested_at: String::new(),
         source_format: crate::SourceFormat::Pdf,
+        source_url: None,
         main_tex: None,
         tags: Vec::new(),
         schema_version: crate::SCHEMA_VERSION,

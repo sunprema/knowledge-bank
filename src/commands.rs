@@ -5,7 +5,7 @@ use crate::config::{Config, KbPaths};
 use crate::index::{consistency_check, MetaDb, VectorIndex};
 use crate::ingest::{arxiv, pipeline};
 use crate::search::{retrieval, SearchFilters, SearchMode};
-use crate::{deep_link, KbError, PaperMetadata, SectionType};
+use crate::{deep_link, DocKind, KbError, PaperMetadata, SectionType};
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -93,22 +93,42 @@ pub fn init(kb: &Kb) -> Result<(), KbError> {
     Ok(())
 }
 
-pub async fn add(kb: &Kb, id_or_url: Option<String>, pdf: Option<PathBuf>) -> Result<(), KbError> {
-    match (id_or_url, pdf) {
-        (Some(_), Some(_)) => Err(KbError::Usage(
-            "pass an arXiv id/URL or --pdf <file>, not both".to_string(),
+pub async fn add(
+    kb: &Kb,
+    id_or_url: Option<String>,
+    pdf: Option<PathBuf>,
+    url: Option<String>,
+) -> Result<(), KbError> {
+    match (id_or_url, pdf, url) {
+        (None, Some(path), None) => run_ingest(kb, IngestInput::LocalPdf(path)).await,
+        (None, None, Some(url)) => {
+            run_ingest(kb, IngestInput::Url { input: url, refetch: false }).await
+        }
+        (Some(input), None, None) => {
+            run_ingest(kb, IngestInput::Arxiv { input, refetch: false }).await
+        }
+        (None, None, None) => Err(KbError::Usage(
+            "usage: kb add <arxiv-id-or-url> | kb add --pdf <file.pdf> | kb add --url <page-url>"
+                .to_string(),
         )),
-        (Some(input), None) => run_ingest(kb, IngestInput::Arxiv { input, refetch: false }).await,
-        (None, Some(path)) => run_ingest(kb, IngestInput::LocalPdf(path)).await,
-        (None, None) => Err(KbError::Usage(
-            "usage: kb add <arxiv-id-or-url> | kb add --pdf <file.pdf>".to_string(),
+        _ => Err(KbError::Usage(
+            "pass exactly one of: an arXiv id/URL, --pdf <file>, or --url <page-url>".to_string(),
         )),
     }
 }
 
 pub async fn update(kb: &Kb, arxiv_id: String) -> Result<(), KbError> {
     let id = canonical_id(&arxiv_id)?;
-    require_paper(kb, &id)?;
+    let meta = require_paper(kb, &id)?;
+    if meta.kind == DocKind::Note {
+        return Err(KbError::Usage(format!(
+            "{id} is an idea; re-capture it with `kb idea add` (same title or id updates in place)"
+        )));
+    }
+    // A web page re-fetches from its recorded URL, not the arXiv API.
+    if let Some(url) = meta.source_url {
+        return run_ingest(kb, IngestInput::Url { input: url, refetch: true }).await;
+    }
     if arxiv::parse_arxiv_id(&id).is_err() {
         return Err(KbError::Usage(format!(
             "{id} was ingested from a local PDF and has nothing to re-fetch; \
@@ -118,9 +138,73 @@ pub async fn update(kb: &Kb, arxiv_id: String) -> Result<(), KbError> {
     run_ingest(kb, IngestInput::Arxiv { input: id, refetch: true }).await
 }
 
+/// `kb idea add`: capture (or upsert) a standalone idea. `body` is literal
+/// text, `-` for stdin, or absent to compose in $EDITOR.
+pub async fn idea_add(
+    kb: &Kb,
+    project: String,
+    title: String,
+    body: Option<String>,
+    tags: Vec<String>,
+    links: Vec<String>,
+) -> Result<(), KbError> {
+    let body = match body.as_deref() {
+        Some("-") => {
+            let mut buf = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)
+                .map_err(|e| KbError::Usage(format!("cannot read body from stdin: {e}")))?;
+            buf
+        }
+        Some(text) => text.to_string(),
+        None => compose_in_editor(&title)?,
+    };
+    let spec = pipeline::IdeaSpec {
+        slug: None,
+        project,
+        title,
+        body,
+        tags,
+        links,
+    };
+    run_ingest(kb, IngestInput::Idea(spec)).await
+}
+
+/// Open $EDITOR on a temp file pre-seeded with the idea title; returns the
+/// composed body (the seed heading stripped if left untouched).
+fn compose_in_editor(title: &str) -> Result<String, KbError> {
+    let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
+    let tmp = tempfile::Builder::new()
+        .prefix("kb-idea-")
+        .suffix(".md")
+        .tempfile()
+        .map_err(|e| KbError::Usage(format!("cannot create temp file: {e}")))?;
+    std::fs::write(tmp.path(), format!("<!-- {title} — write the idea below -->\n\n"))
+        .map_err(|e| KbError::Usage(format!("cannot seed temp file: {e}")))?;
+    let status = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!("{editor} \"$1\""))
+        .arg("kb-idea")
+        .arg(tmp.path())
+        .status()
+        .map_err(|e| KbError::Usage(format!("cannot launch $EDITOR ({editor}): {e}")))?;
+    if !status.success() {
+        return Err(KbError::Usage(format!("$EDITOR exited with {status}")));
+    }
+    let raw = std::fs::read_to_string(tmp.path())
+        .map_err(|e| KbError::Usage(format!("cannot read back temp file: {e}")))?;
+    let body: String = raw
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("<!--"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Ok(body)
+}
+
 enum IngestInput {
     Arxiv { input: String, refetch: bool },
+    Url { input: String, refetch: bool },
     LocalPdf(PathBuf),
+    Idea(pipeline::IdeaSpec),
 }
 
 async fn run_ingest(kb: &Kb, job: IngestInput) -> Result<(), KbError> {
@@ -142,8 +226,14 @@ async fn run_ingest(kb: &Kb, job: IngestInput) -> Result<(), KbError> {
         IngestInput::Arxiv { input, refetch } => {
             pipeline::ingest_paper(&kb.paths, &kb.config, input, *refetch, &progress).await
         }
+        IngestInput::Url { input, refetch } => {
+            pipeline::ingest_url(&kb.paths, &kb.config, input, *refetch, &progress).await
+        }
         IngestInput::LocalPdf(path) => {
             pipeline::ingest_local_pdf(&kb.paths, &kb.config, path, &progress).await
+        }
+        IngestInput::Idea(spec) => {
+            pipeline::ingest_idea(&kb.paths, &kb.config, spec, &progress).await
         }
     };
     if let Some(s) = &spinner {
@@ -173,10 +263,16 @@ async fn run_ingest(kb: &Kb, job: IngestInput) -> Result<(), KbError> {
                 match report.source_format {
                     crate::SourceFormat::Latex => "LaTeX",
                     crate::SourceFormat::Pdf => "PDF",
+                    crate::SourceFormat::Markdown => "markdown",
+                    crate::SourceFormat::Html => "HTML",
                 },
                 report.elapsed_secs
             );
-            println!("  notes: kb note {}", report.paper_id);
+            if report.source_format == crate::SourceFormat::Markdown {
+                println!("  view: kb show {}", report.paper_id);
+            } else {
+                println!("  notes: kb note {}", report.paper_id);
+            }
         }
     }
     Ok(())
@@ -323,7 +419,12 @@ pub async fn search(
     Ok(())
 }
 
-pub fn list(kb: &Kb, tag: Option<String>) -> Result<(), KbError> {
+pub fn list(
+    kb: &Kb,
+    tag: Option<String>,
+    kind: Option<DocKind>,
+    project: Option<String>,
+) -> Result<(), KbError> {
     let ids = kb.paths.list_paper_ids()?;
     let mut rows = Vec::new();
     for id in ids {
@@ -339,6 +440,16 @@ pub fn list(kb: &Kb, tag: Option<String>) -> Result<(), KbError> {
         {
             continue;
         }
+        if let Some(k) = kind
+            && meta.kind != k
+        {
+            continue;
+        }
+        if let Some(p) = &project
+            && meta.project.as_deref() != Some(p.as_str())
+        {
+            continue;
+        }
         rows.push(meta);
     }
 
@@ -348,18 +459,23 @@ pub fn list(kb: &Kb, tag: Option<String>) -> Result<(), KbError> {
         }
         OutputFormat::Pretty => {
             if rows.is_empty() {
-                println!("no papers{}", tag.map(|t| format!(" with tag '{t}'")).unwrap_or_default());
+                println!("no documents{}", tag.map(|t| format!(" with tag '{t}'")).unwrap_or_default());
                 return Ok(());
             }
             for meta in &rows {
+                let marker = match (&meta.kind, &meta.project) {
+                    (DocKind::Note, Some(p)) => format!("  (idea: {p})"),
+                    (DocKind::Note, None) => "  (idea)".to_string(),
+                    _ => String::new(),
+                };
                 let tags = if meta.tags.is_empty() {
                     String::new()
                 } else {
                     format!("  [{}]", meta.tags.join(", "))
                 };
-                println!("{}  {}{}", meta.arxiv_id, meta.title, tags);
+                println!("{}  {}{}{}", meta.arxiv_id, meta.title, marker, tags);
             }
-            println!("\n{} papers", rows.len());
+            println!("\n{} documents", rows.len());
         }
     }
     Ok(())
@@ -369,6 +485,11 @@ pub fn show(kb: &Kb, arxiv_id: String) -> Result<(), KbError> {
     let id = canonical_id(&arxiv_id)?;
     let meta = require_paper(kb, &id)?;
     let notes = std::fs::read_to_string(kb.paths.notes_path(&id)).unwrap_or_default();
+    let body = if meta.kind == DocKind::Note {
+        std::fs::read_to_string(kb.paths.idea_path(&id)).unwrap_or_default()
+    } else {
+        String::new()
+    };
     let db = MetaDb::open(&kb.paths.meta_db_path())?;
     let chunks = db.chunks_for_paper(&id)?;
 
@@ -385,15 +506,34 @@ pub fn show(kb: &Kb, arxiv_id: String) -> Result<(), KbError> {
                     })
                 })
                 .collect();
+            let mut payload = json!({
+                "metadata": &meta,
+                "notes": notes,
+                "chunks": sections,
+            });
+            if meta.kind == DocKind::Note {
+                payload["body"] = json!(body);
+            }
+            println!("{}", serde_json::to_string_pretty(&payload).unwrap());
+        }
+        OutputFormat::Pretty if meta.kind == DocKind::Note => {
+            println!("{}  ({})", meta.title, meta.arxiv_id);
+            println!("project:    {}", meta.project.as_deref().unwrap_or("(none)"));
+            if !meta.tags.is_empty() {
+                println!("tags:       {}", meta.tags.join(", "));
+            }
+            if !meta.links.is_empty() {
+                println!("links:      {}", meta.links.join(", "));
+            }
             println!(
-                "{}",
-                serde_json::to_string_pretty(&json!({
-                    "metadata": meta,
-                    "notes": notes,
-                    "chunks": sections,
-                }))
-                .unwrap()
+                "captured:   {}, updated {}",
+                meta.ingested_at, meta.updated_at
             );
+            println!("file:       {}", kb.paths.idea_path(&id).display());
+            println!("\n{}", body.trim_end());
+            if chunks.is_empty() {
+                println!("\n(no indexed chunks — run `kb reindex`)");
+            }
         }
         OutputFormat::Pretty => {
             println!("{}  ({})", meta.title, meta.arxiv_id);
@@ -404,8 +544,16 @@ pub fn show(kb: &Kb, arxiv_id: String) -> Result<(), KbError> {
                 println!("tags:       {}", meta.tags.join(", "));
             }
             println!("source:     {:?}, ingested {}", meta.source_format, meta.ingested_at);
-            println!("pdf:        {}", kb.paths.pdf_path(&id).display());
-            println!("\nabstract:\n{}\n", meta.abstract_text);
+            if let Some(url) = &meta.source_url {
+                println!("url:        {url}");
+            }
+            let pdf_path = kb.paths.pdf_path(&id);
+            if pdf_path.exists() {
+                println!("pdf:        {}", pdf_path.display());
+            }
+            if !meta.abstract_text.is_empty() {
+                println!("\nabstract:\n{}\n", meta.abstract_text);
+            }
             if chunks.is_empty() {
                 println!("(no indexed chunks — run `kb reindex`)");
             } else {

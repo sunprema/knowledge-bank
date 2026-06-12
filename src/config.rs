@@ -124,11 +124,16 @@ impl Default for ServerConfig {
 #[serde(default)]
 pub struct WatcherConfig {
     pub debounce_ms: u64,
+    /// Auto-ingest files dropped into `<root>/inbox/` while `kb watch` runs.
+    pub inbox_enabled: bool,
 }
 
 impl Default for WatcherConfig {
     fn default() -> Self {
-        WatcherConfig { debounce_ms: 2000 }
+        WatcherConfig {
+            debounce_ms: 2000,
+            inbox_enabled: true,
+        }
     }
 }
 
@@ -225,6 +230,18 @@ impl KbPaths {
         self.dot_dir().join("api_key")
     }
 
+    /// Drop-folder watched by `kb watch` for auto-ingest of `*.pdf` and
+    /// `*.url`/`*.txt` (URL lists). Visible on the drive, beside the paper
+    /// folders.
+    pub fn inbox_dir(&self) -> PathBuf {
+        self.root.join("inbox")
+    }
+    /// Where files that failed to ingest are parked (so they aren't retried
+    /// forever and the user can see what didn't work).
+    pub fn inbox_failed_dir(&self) -> PathBuf {
+        self.inbox_dir().join("failed")
+    }
+
     pub fn paper_dir(&self, arxiv_id: &str) -> PathBuf {
         self.root.join(arxiv_id)
     }
@@ -242,6 +259,10 @@ impl KbPaths {
     }
     pub fn notes_path(&self, arxiv_id: &str) -> PathBuf {
         self.paper_dir(arxiv_id).join("notes.md")
+    }
+    /// Canonical body of a standalone idea (`kind = note`).
+    pub fn idea_path(&self, id: &str) -> PathBuf {
+        self.paper_dir(id).join("idea.md")
     }
 
     /// Paper folders = direct children of root containing a metadata.json
@@ -263,5 +284,22 @@ impl KbPaths {
         }
         ids.sort();
         Ok(ids)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inbox_paths_live_under_root() {
+        let paths = KbPaths { root: PathBuf::from("/kb") };
+        assert_eq!(paths.inbox_dir(), PathBuf::from("/kb/inbox"));
+        assert_eq!(paths.inbox_failed_dir(), PathBuf::from("/kb/inbox/failed"));
+    }
+
+    #[test]
+    fn inbox_is_enabled_by_default() {
+        assert!(WatcherConfig::default().inbox_enabled);
     }
 }

@@ -32,7 +32,7 @@ fn list_empty_corpus() {
         .arg("list")
         .assert()
         .success()
-        .stdout(predicate::str::contains("no papers"));
+        .stdout(predicate::str::contains("no documents"));
 }
 
 #[test]
@@ -82,7 +82,27 @@ fn add_with_both_id_and_pdf_exits_1() {
         .args(["add", "2504.19874", "--pdf", "paper.pdf"])
         .assert()
         .code(1)
-        .stderr(predicate::str::contains("not both"));
+        .stderr(predicate::str::contains("exactly one of"));
+}
+
+#[test]
+fn add_with_pdf_and_url_exits_1() {
+    let dir = tempfile::tempdir().unwrap();
+    kb(dir.path())
+        .args(["add", "--pdf", "paper.pdf", "--url", "https://example.com"])
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("exactly one of"));
+}
+
+#[test]
+fn add_url_with_invalid_url_exits_1() {
+    let dir = tempfile::tempdir().unwrap();
+    kb(dir.path())
+        .args(["add", "--url", "not-a-url"])
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("valid URL"));
 }
 
 #[test]
@@ -119,6 +139,90 @@ fn add_pdf_non_pdf_payload_exits_4() {
         .code(4)
         .stderr(predicate::str::contains("is not a PDF"));
     assert!(!dir.path().join("notes-on-things").exists());
+}
+
+#[test]
+fn idea_add_writes_canonical_files_even_without_api_key() {
+    let dir = tempfile::tempdir().unwrap();
+    // Without OPENAI_API_KEY the embed step fails (exit 10), but the
+    // canonical files must already be on disk — `kb reindex`/watch can
+    // finish the job later (design invariant).
+    kb(dir.path())
+        .env_remove("OPENAI_API_KEY")
+        .args([
+            "idea", "add",
+            "--project", "kitgig",
+            "--title", "x402 anon lane",
+            "--body", "Use x402 micropayments for an anonymous per-call lane.",
+            "--tags", "payments,x402",
+        ])
+        .assert()
+        .code(10);
+
+    let folder = dir.path().join("x402-anon-lane");
+    assert!(folder.join("metadata.json").exists());
+    let body = std::fs::read_to_string(folder.join("idea.md")).unwrap();
+    assert!(body.contains("anonymous per-call lane"));
+    let meta = std::fs::read_to_string(folder.join("metadata.json")).unwrap();
+    assert!(meta.contains("\"kind\": \"note\""));
+    assert!(meta.contains("\"project\": \"kitgig\""));
+
+    // Visible to list, filterable by kind and project.
+    kb(dir.path())
+        .args(["list", "--kind", "note", "--project", "kitgig"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("x402-anon-lane"))
+        .stdout(predicate::str::contains("(idea: kitgig)"));
+    kb(dir.path())
+        .args(["list", "--kind", "paper"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("no documents"));
+
+    // show renders the body and project.
+    kb(dir.path())
+        .args(["show", "x402-anon-lane"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("project:    kitgig"))
+        .stdout(predicate::str::contains("anonymous per-call lane"));
+
+    // Re-capture with the same title = upsert: no duplicate folder, body
+    // replaced, tags kept (none supplied the second time).
+    kb(dir.path())
+        .env_remove("OPENAI_API_KEY")
+        .args([
+            "idea", "add",
+            "--project", "kitgig",
+            "--title", "x402 anon lane",
+            "--body", "Refined: settle anonymously via x402 escrow.",
+        ])
+        .assert()
+        .code(10);
+    let body = std::fs::read_to_string(folder.join("idea.md")).unwrap();
+    assert!(body.contains("Refined"));
+    assert!(!body.contains("per-call lane"), "body replaced, not appended");
+    let meta = std::fs::read_to_string(folder.join("metadata.json")).unwrap();
+    assert!(meta.contains("\"payments\""), "tags survive an upsert");
+
+    // update on an idea points at re-capture.
+    kb(dir.path())
+        .args(["update", "x402-anon-lane"])
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("kb idea add"));
+}
+
+#[test]
+fn idea_add_empty_body_exits_1() {
+    let dir = tempfile::tempdir().unwrap();
+    kb(dir.path())
+        .args(["idea", "add", "--project", "p", "--title", "t", "--body", "  "])
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("body must not be empty"));
+    assert!(!dir.path().join("t").exists());
 }
 
 #[test]

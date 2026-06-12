@@ -159,7 +159,7 @@ fn filtered_search_allowlist_end_to_end() {
     insert_paper(&db, &mut index, "2405.12497", 3);
 
     let allow: Vec<u64> = db
-        .vector_ids_filtered(None, Some(&["2504.19874".to_string()]), None)
+        .vector_ids_filtered(None, Some(&["2504.19874".to_string()]), None, None, None)
         .unwrap()
         .into_iter()
         .map(|i| i as u64)
@@ -178,4 +178,54 @@ fn filtered_search_allowlist_end_to_end() {
     }
     let hits = index.search(&query, 10, Some(&allow)).unwrap();
     assert!(hits.is_empty());
+}
+
+/// Kind/project filters resolve through the documents mirror to a working
+/// allowlist — the cross-project idea recall path ([proj, "global"]).
+#[test]
+fn kind_and_project_filters_end_to_end() {
+    let dir = tempfile::tempdir().unwrap();
+    let (db, index) = open_stores(dir.path());
+    let mut index = index;
+    insert_paper(&db, &mut index, "2504.19874", 2); // paper, no documents row (legacy)
+    insert_paper(&db, &mut index, "kitgig-x402-anon-lane", 1);
+    insert_paper(&db, &mut index, "shared-pricing-insight", 1);
+    db.set_document("kitgig-x402-anon-lane", kb::DocKind::Note, Some("kitgig"))
+        .unwrap();
+    db.set_document("shared-pricing-insight", kb::DocKind::Note, Some("global"))
+        .unwrap();
+
+    // kind=note allowlist excludes the paper; searching within it works.
+    let notes: Vec<u64> = db
+        .vector_ids_filtered(None, None, None, Some(kb::DocKind::Note), None)
+        .unwrap()
+        .into_iter()
+        .map(|i| i as u64)
+        .collect();
+    assert_eq!(notes.len(), 2);
+    let query = test_vector(notes[0] as usize);
+    let hits = index.search(&query, 10, Some(&notes)).unwrap();
+    assert_eq!(hits.len(), 2);
+
+    // kind=paper still matches the legacy row with no documents entry.
+    let papers = db
+        .vector_ids_filtered(None, None, None, Some(kb::DocKind::Paper), None)
+        .unwrap();
+    assert_eq!(papers.len(), 2);
+
+    // The session query: this project's ideas plus global ones.
+    let cross = db
+        .vector_ids_filtered(
+            None,
+            None,
+            None,
+            Some(kb::DocKind::Note),
+            Some(&["kitgig".to_string(), "global".to_string()]),
+        )
+        .unwrap();
+    assert_eq!(cross.len(), 2);
+    let only_kitgig = db
+        .vector_ids_filtered(None, None, None, None, Some(&["kitgig".to_string()]))
+        .unwrap();
+    assert_eq!(only_kitgig.len(), 1);
 }

@@ -9,10 +9,10 @@ use crate::config::{Config, KbPaths};
 use crate::embed::OpenAiEmbedder;
 use crate::index::{MetaDb, NewChunk, VectorIndex};
 use crate::ingest::latex::EprintContent;
-use crate::ingest::{arxiv, latex, pdf, sections};
+use crate::ingest::{arxiv, html, latex, pdf, sections};
 use crate::{
-    content_hash, make_snippet, now_rfc3339, KbError, PaperMetadata, RawChunk, SectionType,
-    SourceFormat, EMBEDDING_VERSION,
+    content_hash, make_snippet, now_rfc3339, DocKind, KbError, PaperMetadata, RawChunk,
+    SectionType, SourceFormat, EMBEDDING_VERSION,
 };
 use std::path::Path;
 use std::time::Instant;
@@ -137,6 +137,21 @@ pub async fn ingest_local_pdf(
     progress: &dyn Fn(&str),
 ) -> Result<IngestReport, KbError> {
     let t0 = Instant::now();
+    let id = materialize_local_pdf(paths, pdf_file, progress)?;
+    let meta = PaperMetadata::load(&paths.metadata_path(&id))?;
+    index_and_report(paths, config, &id, &meta, t0, progress).await
+}
+
+/// Write a local PDF's canonical folder to disk (paper.pdf, sections.md,
+/// metadata.json, notes template) and return its id — WITHOUT touching the
+/// vector index. Split out so the folder-watcher's inbox can materialize a
+/// paper and let its own long-lived index handle the indexing (a second
+/// index handle would diverge from the watcher's; see `fs_watcher`).
+pub fn materialize_local_pdf(
+    paths: &KbPaths,
+    pdf_file: &Path,
+    progress: &dyn Fn(&str),
+) -> Result<String, KbError> {
     let stem = pdf_file
         .file_stem()
         .and_then(|s| s.to_str())
@@ -169,6 +184,9 @@ pub async fn ingest_local_pdf(
 
     let meta = PaperMetadata {
         arxiv_id: id.clone(),
+        kind: DocKind::Paper,
+        project: None,
+        links: Vec::new(),
         version: None,
         title,
         authors: Vec::new(),
@@ -178,6 +196,7 @@ pub async fn ingest_local_pdf(
         updated_at: String::new(),
         ingested_at: now_rfc3339(),
         source_format: SourceFormat::Pdf,
+        source_url: None,
         main_tex: None,
         tags: Vec::new(),
         schema_version: crate::SCHEMA_VERSION,
@@ -185,8 +204,230 @@ pub async fn ingest_local_pdf(
     meta.save(&paths.metadata_path(&id))?;
 
     ensure_notes_template(paths, &id, &meta.title)?;
+    Ok(id)
+}
 
-    index_and_report(paths, config, &id, &meta, t0, progress).await
+/// `kb add --url` flow: fetch a web page, extract its main article with a
+/// readability port, and ingest the markdown like a paper's `sections.md`.
+/// The on-disk id is a slug of the URL; the URL itself is recorded in
+/// metadata as the document's canonical identity. `refetch: false` refuses
+/// a URL already in the KB; `refetch: true` re-downloads and re-embeds
+/// (preserving user-owned tags and notes.md).
+pub async fn ingest_url(
+    paths: &KbPaths,
+    config: &Config,
+    input: &str,
+    refetch: bool,
+    progress: &dyn Fn(&str),
+) -> Result<IngestReport, KbError> {
+    let t0 = Instant::now();
+    let id = materialize_url(paths, input, refetch, progress).await?;
+
+    progress("embedding and indexing");
+    let db = MetaDb::open(&paths.meta_db_path())?;
+    let mut index = VectorIndex::open_or_create(
+        &paths.index_path(),
+        config.embedding.dimensions,
+        config.turbovec.bit_width,
+    )?;
+    let (n_chunks, cache_hits) = index_paper_from_disk(paths, config, &db, &mut index, &id).await?;
+    let meta = PaperMetadata::load(&paths.metadata_path(&id))?;
+
+    let elapsed = t0.elapsed().as_secs_f64();
+    log_line(
+        paths,
+        &format!("ingested {id} from {input}: {n_chunks} chunks ({elapsed:.1}s)"),
+    );
+
+    Ok(IngestReport {
+        paper_id: id,
+        title: meta.title,
+        chunks: n_chunks,
+        cache_hits,
+        source_format: SourceFormat::Html,
+        elapsed_secs: elapsed,
+    })
+}
+
+/// Fetch a page and write its canonical folder (sections.md, metadata.json,
+/// notes template) to disk, returning the id — WITHOUT touching the vector
+/// index. Counterpart to [`materialize_local_pdf`] for the inbox watcher.
+pub async fn materialize_url(
+    paths: &KbPaths,
+    input: &str,
+    refetch: bool,
+    progress: &dyn Fn(&str),
+) -> Result<String, KbError> {
+    let url = html::parse_url(input)?;
+    let id = html::slug_from_url(&url);
+
+    let existing = PaperMetadata::load(&paths.metadata_path(&id)).ok();
+    if existing.is_some() && !refetch {
+        return Err(KbError::Usage(format!(
+            "{url} is already in the KB as {id} (use `kb update {id}` to re-fetch)"
+        )));
+    }
+
+    let client = http_client()?;
+    progress("fetching page");
+    let body = html::fetch_html(&client, &url).await?;
+    progress("extracting article (readability)");
+    let (title, markdown) = html::extract_article(&body, &url)?;
+
+    let paper_dir = paths.paper_dir(&id);
+    std::fs::create_dir_all(&paper_dir).map_err(|e| io_err("create paper folder", e))?;
+    std::fs::write(paths.sections_path(&id), markdown + "\n")
+        .map_err(|e| io_err("write sections.md", e))?;
+
+    let now = now_rfc3339();
+    let meta = PaperMetadata {
+        arxiv_id: id.clone(),
+        kind: DocKind::Paper,
+        project: None,
+        links: Vec::new(),
+        version: None,
+        title,
+        authors: Vec::new(),
+        abstract_text: String::new(),
+        categories: Vec::new(),
+        published_at: String::new(),
+        updated_at: now.clone(),
+        ingested_at: existing.as_ref().map_or(now, |old| old.ingested_at.clone()),
+        source_format: SourceFormat::Html,
+        source_url: Some(url.to_string()),
+        main_tex: None,
+        // Tags are user-owned and canonical here; survive a re-fetch.
+        tags: existing.map(|old| old.tags).unwrap_or_default(),
+        schema_version: crate::SCHEMA_VERSION,
+    };
+    meta.save(&paths.metadata_path(&id))?;
+
+    ensure_notes_template(paths, &id, &meta.title)?;
+    Ok(id)
+}
+
+/// Parse a `*.url`/`*.txt` inbox file into a list of URLs: one per line,
+/// skipping blanks and `#` comments. (Both extensions use the same rule —
+/// a single-line `.url` is just the one-URL case.)
+pub fn parse_url_lines(content: &str) -> Vec<String> {
+    content
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(str::to_string)
+        .collect()
+}
+
+/// One `kb idea add` / MCP `kb_capture_idea` payload.
+#[derive(Debug, Clone)]
+pub struct IdeaSpec {
+    /// Explicit id (MCP `upsert_key`); derived from the title when absent.
+    pub slug: Option<String>,
+    pub project: String,
+    pub title: String,
+    pub body: String,
+    /// Empty = keep existing tags on an upsert.
+    pub tags: Vec<String>,
+    /// Empty = keep existing links on an upsert.
+    pub links: Vec<String>,
+}
+
+/// Capture (or upsert) a standalone idea: write the canonical folder
+/// (metadata.json + idea.md), then chunk + embed + index it. Re-capturing
+/// an existing id updates in place — no duplicate.
+pub async fn ingest_idea(
+    paths: &KbPaths,
+    config: &Config,
+    spec: &IdeaSpec,
+    progress: &dyn Fn(&str),
+) -> Result<IngestReport, KbError> {
+    let t0 = Instant::now();
+    let id = match &spec.slug {
+        Some(s) => {
+            let normalized = slug_from_filename(s)?;
+            if normalized != *s {
+                return Err(KbError::Usage(format!(
+                    "'{s}' is not a valid idea id (did you mean '{normalized}'?)"
+                )));
+            }
+            normalized
+        }
+        None => slug_from_filename(&spec.title)?,
+    };
+    if spec.project.trim().is_empty() {
+        return Err(KbError::Usage("project must not be empty".to_string()));
+    }
+    if spec.body.trim().is_empty() {
+        return Err(KbError::Usage("idea body must not be empty".to_string()));
+    }
+
+    // Upsert: an existing note with this id is updated; an existing PAPER
+    // with this id is a collision, not an update target.
+    let existing = PaperMetadata::load(&paths.metadata_path(&id)).ok();
+    if let Some(old) = &existing
+        && old.kind != DocKind::Note
+    {
+        return Err(KbError::Usage(format!(
+            "{id} already names a paper in the KB; pick a different idea title or id"
+        )));
+    }
+
+    let now = now_rfc3339();
+    let meta = PaperMetadata {
+        arxiv_id: id.clone(),
+        kind: DocKind::Note,
+        project: Some(spec.project.clone()),
+        links: match (&existing, spec.links.is_empty()) {
+            (Some(old), true) => old.links.clone(),
+            _ => spec.links.clone(),
+        },
+        version: None,
+        title: spec.title.clone(),
+        authors: Vec::new(),
+        abstract_text: String::new(),
+        categories: Vec::new(),
+        published_at: String::new(),
+        updated_at: now.clone(),
+        ingested_at: existing.as_ref().map_or(now, |old| old.ingested_at.clone()),
+        source_format: SourceFormat::Markdown,
+        source_url: None,
+        main_tex: None,
+        tags: match (&existing, spec.tags.is_empty()) {
+            (Some(old), true) => old.tags.clone(),
+            _ => spec.tags.clone(),
+        },
+        schema_version: crate::SCHEMA_VERSION,
+    };
+
+    progress("writing idea");
+    std::fs::create_dir_all(paths.paper_dir(&id)).map_err(|e| io_err("create idea folder", e))?;
+    std::fs::write(paths.idea_path(&id), spec.body.trim_end().to_string() + "\n")
+        .map_err(|e| io_err("write idea.md", e))?;
+    meta.save(&paths.metadata_path(&id))?;
+
+    progress("embedding and indexing");
+    let db = MetaDb::open(&paths.meta_db_path())?;
+    let mut index = VectorIndex::open_or_create(
+        &paths.index_path(),
+        config.embedding.dimensions,
+        config.turbovec.bit_width,
+    )?;
+    let (n_chunks, cache_hits) = index_paper_from_disk(paths, config, &db, &mut index, &id).await?;
+
+    let elapsed = t0.elapsed().as_secs_f64();
+    log_line(
+        paths,
+        &format!("captured idea {id}: {n_chunks} chunks ({elapsed:.1}s)"),
+    );
+
+    Ok(IngestReport {
+        paper_id: id,
+        title: meta.title,
+        chunks: n_chunks,
+        cache_hits,
+        source_format: SourceFormat::Markdown,
+        elapsed_secs: elapsed,
+    })
 }
 
 /// Filename stem → paper id for local PDFs: lowercase ASCII alphanumerics,
@@ -249,7 +490,7 @@ async fn index_and_report(
         config.turbovec.bit_width,
     )?;
     let (n_chunks, cache_hits) = embed_and_commit(
-        paths, config, &db, &mut index, id, &chunks, &pages, &toc, &meta.tags,
+        paths, config, &db, &mut index, id, &chunks, &pages, &toc, meta,
     )
     .await?;
 
@@ -282,13 +523,18 @@ pub async fn index_paper_from_disk(
 ) -> Result<(usize, usize), KbError> {
     let meta = PaperMetadata::load(&paths.metadata_path(paper_id))?;
 
-    // sections.md is derived; if it's missing but the PDF survives,
-    // regenerate it (addendum §8 step 5b).
-    let sections_path = paths.sections_path(paper_id);
-    if !sections_path.exists() && paths.pdf_path(paper_id).exists() {
-        write_sections_from_pdf(&paths.pdf_path(paper_id), &sections_path)?;
-    }
-    let sections_md = std::fs::read_to_string(&sections_path).ok();
+    let sections_md = if meta.kind == DocKind::Note {
+        // An idea's body is its canonical content — no PDF, no sections.md.
+        std::fs::read_to_string(paths.idea_path(paper_id)).ok()
+    } else {
+        // sections.md is derived; if it's missing but the PDF survives,
+        // regenerate it (addendum §8 step 5b).
+        let sections_path = paths.sections_path(paper_id);
+        if !sections_path.exists() && paths.pdf_path(paper_id).exists() {
+            write_sections_from_pdf(&paths.pdf_path(paper_id), &sections_path)?;
+        }
+        std::fs::read_to_string(&sections_path).ok()
+    };
     let notes_md = std::fs::read_to_string(paths.notes_path(paper_id)).ok();
 
     let chunks = sections::build_chunks(
@@ -298,15 +544,22 @@ pub async fn index_paper_from_disk(
         config.ingest.chunk_max_tokens,
     )?;
 
-    let toc = if paths.pdf_path(paper_id).exists() {
+    // Pages come from a PDF outline; ideas (markdown) and web pages (HTML)
+    // have none. Keying on the PDF's existence covers all three uniformly.
+    let has_pdf = meta.kind != DocKind::Note && paths.pdf_path(paper_id).exists();
+    let toc = if has_pdf {
         pdf::extract_toc(&paths.pdf_path(paper_id)).unwrap_or_default()
     } else {
         Vec::new()
     };
-    let pages = assign_pages(&chunks, &toc);
+    let pages = if has_pdf {
+        assign_pages(&chunks, &toc)
+    } else {
+        vec![None; chunks.len()]
+    };
 
     embed_and_commit(
-        paths, config, db, index, paper_id, &chunks, &pages, &toc, &meta.tags,
+        paths, config, db, index, paper_id, &chunks, &pages, &toc, &meta,
     )
     .await
 }
@@ -427,7 +680,7 @@ async fn embed_and_commit(
     chunks: &[RawChunk],
     pages: &[Option<u32>],
     toc: &[crate::TocEntry],
-    tags: &[String],
+    meta: &PaperMetadata,
 ) -> Result<(usize, usize), KbError> {
     let model = &config.embedding.model;
 
@@ -494,7 +747,8 @@ async fn embed_and_commit(
             index.add(&ids, &flat)?;
         }
         db.replace_toc(paper_id, toc)?;
-        db.set_tags(paper_id, tags)?;
+        db.set_tags(paper_id, &meta.tags)?;
+        db.set_document(paper_id, meta.kind, meta.project.as_deref())?;
         db.meta_set("vector_fingerprint", &config.vector_fingerprint())?;
         db.meta_set("chunking_fingerprint", &config.chunking_fingerprint())?;
         index.save_atomic(&paths.index_path())?;
@@ -571,6 +825,83 @@ pub fn log_line(paths: &KbPaths, msg: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_url_lines_skips_blanks_and_comments() {
+        let content = "\n  https://a.example/x  \n# a comment\n\nhttps://b.example/y\n   \n";
+        assert_eq!(
+            parse_url_lines(content),
+            vec!["https://a.example/x", "https://b.example/y"]
+        );
+    }
+
+    #[test]
+    fn parse_url_lines_single_url_file() {
+        assert_eq!(
+            parse_url_lines("https://only.example/page\n"),
+            vec!["https://only.example/page"]
+        );
+    }
+
+    #[test]
+    fn materialize_local_pdf_writes_canonical_folder() {
+        use lopdf::content::{Content, Operation};
+        use lopdf::{dictionary, Document, Object, Stream};
+
+        // Build a minimal one-page PDF with extractable text.
+        let dir = tempfile::tempdir().unwrap();
+        let pdf_path = dir.path().join("Hello World.pdf");
+        {
+            let mut doc = Document::with_version("1.5");
+            let pages_id = doc.new_object_id();
+            let font_id = doc.add_object(dictionary! {
+                "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
+            });
+            let resources_id =
+                doc.add_object(dictionary! { "Font" => dictionary! { "F1" => font_id } });
+            let content = Content {
+                operations: vec![
+                    Operation::new("BT", vec![]),
+                    Operation::new("Tf", vec!["F1".into(), 24.into()]),
+                    Operation::new("Td", vec![72.into(), 700.into()]),
+                    Operation::new("Tj", vec![Object::string_literal("Body text on the page")]),
+                    Operation::new("ET", vec![]),
+                ],
+            };
+            let content_id =
+                doc.add_object(Stream::new(dictionary! {}, content.encode().unwrap()));
+            let page_id = doc.add_object(dictionary! {
+                "Type" => "Page", "Parent" => pages_id, "Contents" => content_id,
+                "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+                "Resources" => resources_id,
+            });
+            doc.objects.insert(
+                pages_id,
+                Object::Dictionary(dictionary! {
+                    "Type" => "Pages", "Kids" => vec![Object::Reference(page_id)], "Count" => 1,
+                }),
+            );
+            let catalog_id =
+                doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+            doc.trailer.set("Root", catalog_id);
+            doc.save(&pdf_path).unwrap();
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let paths = KbPaths { root: root.path().to_path_buf() };
+        let id = materialize_local_pdf(&paths, &pdf_path, &|_| {}).unwrap();
+
+        assert_eq!(id, "hello-world");
+        assert!(paths.pdf_path(&id).exists(), "paper.pdf copied in");
+        assert!(paths.sections_path(&id).exists(), "sections.md written");
+        assert!(paths.notes_path(&id).exists(), "notes template written");
+        let meta = PaperMetadata::load(&paths.metadata_path(&id)).unwrap();
+        assert_eq!(meta.source_format, SourceFormat::Pdf);
+        assert!(meta.source_url.is_none());
+
+        // The index was NOT touched (materialize is disk-only).
+        assert!(!paths.index_path().exists());
+    }
 
     #[test]
     fn slug_basic() {

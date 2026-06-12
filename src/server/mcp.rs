@@ -1,6 +1,6 @@
 //! MCP server on stdio (PRD §7): JSON-RPC 2.0, newline-delimited, tools
-//! `kb_search`, `kb_get_paper`, `kb_add_note`. Claude Code launches this
-//! as a subprocess via `kb mcp`.
+//! `kb_search`, `kb_get_paper`, `kb_add_note`, `kb_capture_idea`. Claude
+//! Code launches this as a subprocess via `kb mcp`.
 //!
 //! Discipline: stdout carries ONLY JSON-RPC frames; all diagnostics go to
 //! tracing (stderr). Tool failures are reported as `isError: true` tool
@@ -9,7 +9,7 @@
 use crate::config::{Config, KbPaths};
 use crate::ingest::pipeline;
 use crate::search::{retrieval, SearchFilters, SearchMode};
-use crate::{KbError, PaperMetadata, SectionType};
+use crate::{DocKind, KbError, PaperMetadata, SectionType};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
@@ -106,7 +106,8 @@ fn error_response(id: &Value, code: i64, message: &str) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
 }
 
-/// The three v0.1 tools, schemas per PRD §7 (the contract).
+/// The tool surface: the three v0.1 tools (schemas per PRD §7, the
+/// contract) plus `kb_capture_idea` (standalone idea capture).
 fn tool_definitions() -> Value {
     let section_values: Vec<&str> = SectionType::ALL.iter().map(|t| t.as_str()).collect();
     json!([
@@ -125,9 +126,36 @@ fn tool_definitions() -> Value {
                         "description": "Restrict to these section types. Useful for synthesis — e.g. ['applications', 'future_work'] surfaces what authors propose."
                     },
                     "tags": { "type": "array", "items": { "type": "string" } },
-                    "paper_ids": { "type": "array", "items": { "type": "string" } }
+                    "paper_ids": { "type": "array", "items": { "type": "string" } },
+                    "kind": {
+                        "type": "string",
+                        "enum": ["paper", "note", "all"],
+                        "default": "all",
+                        "description": "Restrict to papers or to captured ideas (notes)."
+                    },
+                    "project": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Restrict ideas to these projects. Query [current_project, 'global'] to get this project's ideas plus cross-project ones."
+                    }
                 },
                 "required": ["query"]
+            }
+        },
+        {
+            "name": "kb_capture_idea",
+            "description": "Capture a standalone idea in the user's KB, keyed by project, so it can be recalled semantically from any future session. Use when the user states an idea, decision, or insight worth keeping that is NOT about a specific paper (for paper annotations use kb_add_note). Use project='global' for ideas that apply across every project. Re-capturing with the same title (or upsert_key) updates the idea instead of duplicating it.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project": { "type": "string", "description": "Project this idea is keyed to, or 'global'." },
+                    "title": { "type": "string", "description": "Short title; also derives the idea's stable id (slugified)." },
+                    "body": { "type": "string", "description": "The idea itself, markdown. Reference related papers/ideas as [[id]]." },
+                    "tags": { "type": "array", "items": { "type": "string" } },
+                    "links": { "type": "array", "items": { "type": "string" }, "description": "Related paper/idea ids." },
+                    "upsert_key": { "type": "string", "description": "Explicit id (slug) to create/update, when the title may have changed." }
+                },
+                "required": ["project", "title", "body"]
             }
         },
         {
@@ -164,6 +192,7 @@ async fn call_tool(
         "kb_search" => tool_search(paths, config, args).await,
         "kb_get_paper" => tool_get_paper(paths, args),
         "kb_add_note" => tool_add_note(paths, config, args).await,
+        "kb_capture_idea" => tool_capture_idea(paths, config, args).await,
         other => Err(KbError::Usage(format!("unknown tool: {other}"))),
     }
 }
@@ -216,10 +245,25 @@ async fn tool_search(paths: &KbPaths, config: &Config, args: &Value) -> Result<S
         None => None,
     };
 
+    let kind = match args.get("kind").and_then(|k| k.as_str()).unwrap_or("all") {
+        "all" => None,
+        other => Some(DocKind::parse(other).ok_or_else(|| {
+            KbError::Usage(format!("unknown kind '{other}' (expected paper, note, or all)"))
+        })?),
+    };
+    // `project` accepts an array or a bare string (agents send both).
+    let projects = str_list(args, "project").or_else(|| {
+        args.get("project")
+            .and_then(|p| p.as_str())
+            .map(|p| vec![p.to_string()])
+    });
+
     let filters = SearchFilters {
         section_types,
         paper_ids: str_list(args, "paper_ids"),
         tags: str_list(args, "tags"),
+        kind,
+        projects,
     };
 
     let response = retrieval::search(paths, config, &query, mode, k, filters).await?;
@@ -273,4 +317,30 @@ async fn tool_add_note(paths: &KbPaths, config: &Config, args: &Value) -> Result
             "note appended to {paper_id}; re-embedding deferred ({e}) — a running `kb watch` or `kb reindex` will pick it up"
         )),
     }
+}
+
+async fn tool_capture_idea(
+    paths: &KbPaths,
+    config: &Config,
+    args: &Value,
+) -> Result<String, KbError> {
+    let spec = pipeline::IdeaSpec {
+        slug: args
+            .get("upsert_key")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        project: str_arg(args, "project")?,
+        title: str_arg(args, "title")?,
+        body: str_arg(args, "body")?,
+        tags: str_list(args, "tags").unwrap_or_default(),
+        links: str_list(args, "links").unwrap_or_default(),
+    };
+    let report = pipeline::ingest_idea(paths, config, &spec, &|_msg| {}).await?;
+    let payload = json!({
+        "id": report.paper_id,
+        "title": report.title,
+        "chunks": report.chunks,
+    });
+    serde_json::to_string_pretty(&payload)
+        .map_err(|e| KbError::Index(format!("serialize result: {e}")))
 }

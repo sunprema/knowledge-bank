@@ -35,6 +35,37 @@ pub const EMBEDDING_VERSION: u32 = 1;
 pub enum SourceFormat {
     Latex,
     Pdf,
+    /// Standalone ideas (`kb idea add`) — the body is markdown, no PDF.
+    Markdown,
+    /// Web pages (`kb add --url`) — readability-extracted, no PDF.
+    Html,
+}
+
+/// Document kind: arXiv/local papers vs standalone idea notes. Defaults to
+/// `Paper` so pre-existing metadata.json files need no migration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DocKind {
+    #[default]
+    Paper,
+    Note,
+}
+
+impl DocKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DocKind::Paper => "paper",
+            DocKind::Note => "note",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "paper" => Some(DocKind::Paper),
+            "note" => Some(DocKind::Note),
+            _ => None,
+        }
+    }
 }
 
 /// The contents of a paper's `metadata.json`. Canonical and user-owned:
@@ -43,6 +74,16 @@ pub enum SourceFormat {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaperMetadata {
     pub arxiv_id: String,
+    /// `paper` (default) or `note` (a standalone idea).
+    #[serde(default)]
+    pub kind: DocKind,
+    /// Notes only: the project this idea is keyed to (`global` = applies
+    /// across every project). Mirrored into meta.db for filtered search.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    /// Notes only: ids of related papers/notes (`[[id]]` links).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub links: Vec<String>,
     #[serde(default)]
     pub version: Option<String>,
     pub title: String,
@@ -54,6 +95,10 @@ pub struct PaperMetadata {
     pub updated_at: String,
     pub ingested_at: String,
     pub source_format: SourceFormat,
+    /// HTML docs only (`kb add --url`): the page this was ingested from.
+    /// Canonical identity for a web page — `kb update` re-fetches it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub main_tex: Option<String>,
     #[serde(default)]
