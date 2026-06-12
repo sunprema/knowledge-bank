@@ -111,7 +111,17 @@ pub fn build_chunks(
 
     if let Some(notes) = notes_md {
         let stripped = strip_html_comments(notes);
-        builder.add_section(SectionType::UserNotes, None, &stripped);
+        // An untouched template is a lone "# Notes on …" heading once the
+        // comment prompts are stripped — embedding it would let the paper
+        // title masquerade as user intent in user_notes-filtered search.
+        let body_without_title = stripped
+            .trim_start()
+            .strip_prefix('#')
+            .map(|rest| rest.split_once('\n').map_or("", |(_, tail)| tail))
+            .unwrap_or(&stripped);
+        if !body_without_title.trim().is_empty() {
+            builder.add_section(SectionType::UserNotes, None, &stripped);
+        }
     }
 
     Ok(builder.chunks)

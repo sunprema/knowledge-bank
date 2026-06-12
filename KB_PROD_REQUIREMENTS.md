@@ -616,7 +616,7 @@ kb_search_narrow(query: &str, k: usize) -> Vec<Result>
 
 - Embed the query
 - Search turbovec with `k=10`
-- Filter results by `min_score >= 0.72` (configurable)
+- Filter results by `min_score >= 0.30` (configurable; calibrated for text-embedding-3-small + 4-bit quantization — relevant matches score ~0.45-0.60)
 - Return top results, ordered by score
 - Each result includes paper metadata, snippet, page, deep-link
 
@@ -927,7 +927,7 @@ When citing papers:
 1. Use the paper title (not just the arxiv id)
 2. Note the section: "TurboQuant (section 3.2 — Method)"
 3. Include the deep_link as a markdown link
-4. If retrieval scores are low (<0.7), note that you're stretching
+4. If retrieval scores are low (<0.35), note that you're stretching
 ```
 
 This skill is what teaches Claude to use the tool well, not just
@@ -1018,7 +1018,7 @@ bit_width = 4                          # 2 | 4 (4 recommended for embedding qual
 [search]
 default_k_narrow = 10
 default_k_wide = 40
-default_min_score_narrow = 0.72
+default_min_score_narrow = 0.30
 default_min_score_wide = 0.0           # no floor in wide mode
 
 [ingest]

@@ -77,7 +77,10 @@ impl Default for SearchConfig {
         SearchConfig {
             default_k_narrow: 10,
             default_k_wide: 40,
-            default_min_score_narrow: 0.72,
+            // Calibrated for text-embedding-3-small + 4-bit turbovec, whose
+            // scores for clearly-relevant matches sit around 0.45-0.60 (the
+            // PRD's original 0.72 hid everything — see smoke-test finding).
+            default_min_score_narrow: 0.30,
             default_min_score_wide: 0.0,
         }
     }

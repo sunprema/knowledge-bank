@@ -32,4 +32,4 @@ When citing papers:
 1. Use the paper title (not just the arxiv id)
 2. Note the section: "TurboQuant (section 3.2 — Method)"
 3. Include the deep_link as a markdown link
-4. If retrieval scores are low (<0.7), note that you're stretching
+4. If retrieval scores are low (<0.35), note that you're stretching
