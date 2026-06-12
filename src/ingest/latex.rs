@@ -156,6 +156,7 @@ fn extract_tar(data: &[u8], source_dir: &Path) -> Result<(), KbError> {
 /// 2. prefer `main.tex`, `paper.tex`, `manuscript.tex`, then one with
 ///    `\begin{document}`
 /// 3. still ambiguous ⇒ largest candidate
+///
 /// No candidates ⇒ `Extraction` error. Returns a path relative to
 /// `source_dir`.
 pub fn find_main_tex(source_dir: &Path) -> Result<PathBuf, KbError> {
