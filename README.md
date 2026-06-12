@@ -1,10 +1,13 @@
-# arxiv-kb
+# Knowledge Bank
 
-A single Rust binary that turns a folder of arXiv papers into a
+A single Rust binary (the `kb` CLI) that turns a folder of arXiv papers into a
 queryable, AI-friendly knowledge base: save a paper in one command,
 search across your corpus semantically, and let Claude synthesize
 across papers via MCP — with every claim deep-linked back to the
 source PDF.
+
+▶ **[Watch the 75-second cinematic demo](https://sunprema.github.io/knowledge-bank/)** —
+served by GitHub Pages from [`docs/`](./docs/index.html).
 
 Full design: [KB_PROD_REQUIREMENTS.md](./KB_PROD_REQUIREMENTS.md) and
 [KB_PERSISTENCE_ADDENDUM.md](./KB_PERSISTENCE_ADDENDUM.md).
@@ -34,6 +37,7 @@ Every command accepts `--root <path>` (or `KB_ROOT`) and
 kb add 2504.19874
 kb add https://arxiv.org/abs/2504.19874     # URLs work too
 kb add --pdf "Attention Is All You Need.pdf"   # any local PDF
+kb add --url https://simonwillison.net/2024/Dec/31/llms-in-2024/   # any web page
 ```
 
 `kb add` does the whole ingest in one shot (~15-20s): fetches metadata
@@ -51,10 +55,41 @@ the PDF's own metadata when present, else from the filename; there's
 no arXiv metadata to fetch, so `kb update` doesn't apply — re-add the
 file after `kb remove` if it changes.
 
+`kb add --url` ingests a web page. It fetches the page, extracts the
+main article with a readability pass (stripping nav/ads/boilerplate),
+converts it to markdown, and indexes it into typed sections like a
+paper. Its id is a slug of the URL (`example.com/post` →
+`example-com-post-a3f9c2`, the hash suffix keeping distinct URLs
+distinct), and the page URL is recorded as the document's canonical
+identity — so `kb update <id>` re-fetches it. Works everywhere an
+arXiv id does. No PDF is downloaded.
+
 ```bash
 kb update 2504.19874     # re-fetch (paper got a new arXiv version); keeps your tags
 kb remove 2504.19874     # delete from the index AND delete the folder (asks first)
 ```
+
+### Drop-folder (inbox)
+
+While `kb watch` is running, anything dropped into `<root>/inbox/` is
+ingested automatically:
+
+```bash
+cp "Some Paper.pdf" "$KB_ROOT/inbox/"     # → ingested like `kb add --pdf`
+echo "https://example.com/post" > "$KB_ROOT/inbox/links.txt"   # one URL per line
+```
+
+A `*.pdf` is ingested as a local PDF; a `*.url` or `*.txt` is read as a
+list of URLs (one per line, `#` comments allowed), each ingested like
+`kb add --url`. On success the dropped file is **deleted** (its content
+now lives in the KB); on failure it's moved to `inbox/failed/` and the
+reason is logged to `kb.log`, so the watcher never retries it in a loop.
+Set `inbox_enabled = false` under `[watcher]` in `config.toml` to turn
+this off.
+
+Deletion is symmetric: remove a paper's folder (or just its
+`metadata.json`) and the running watcher drops its embeddings from both
+stores — no orphaned vectors.
 
 ### Searching
 
@@ -63,6 +98,7 @@ kb search "online vector quantization"                  # narrow mode
 kb search "what could I build with this" --wide         # synthesis mode
 kb search "failure modes" --section limitations,future_work
 kb search "quantization" --tag consumer -k 20
+kb search "payment lane" --kind note --project kitgig --project global
 ```
 
 Search is semantic — it matches meaning, not keywords, so vocabulary
@@ -70,9 +106,27 @@ drift across papers doesn't matter. Two modes: **narrow** (default,
 top 10, drops weak matches below the score floor) for "find me the
 paper/section about X", and **wide** (`--wide`, top 40, no floor) for
 synthesis questions where you want broad material to reason over.
-`--section`, `--tag`, and `--paper` restrict the search. Results are
-grouped per paper, each chunk with its score, section type, snippet,
-and a `file://…#page=N` deep link into the PDF.
+`--section`, `--tag`, `--paper`, `--kind`, and `--project` restrict
+the search. Results are grouped per paper, each chunk with its score,
+section type, snippet, and a `file://…#page=N` deep link into the PDF.
+
+### Capturing ideas
+
+```bash
+kb idea add --project kitgig --title "x402 anon lane" --body "Use x402 for an anonymous per-call payment lane"
+kb idea add --project global --title "shared insight" # no --body: opens $EDITOR
+echo "piped body" | kb idea add --project kitgig --title "from stdin" --body -
+```
+
+Ideas are standalone notes, keyed by project, living in the same index
+as papers — one search surface. The id is the slugified title
+(`x402 anon lane` → `x402-anon-lane`) and works with `kb show`,
+`kb tag`, `kb remove`, and `--paper` search filters. Running
+`kb idea add` again with the same title (or id) **updates the idea in
+place** — no duplicates, so refine freely. Use project `global` for
+ideas that apply across every project, then recall with
+`--kind note --project <current> --project global`. `--link <id>`
+records related papers/ideas.
 
 ### Notes and tags
 
@@ -91,7 +145,7 @@ reindexes) and power `--tag` filters.
 ### Exploring the corpus
 
 ```bash
-kb list                      # all papers (--tag to filter)
+kb list                      # all documents (--tag/--kind/--project to filter)
 kb show 2504.19874           # metadata, abstract, indexed sections, your notes
 kb open 2504.19874           # PDF in your default viewer
 kb open 2504.19874 --section method     # … at that section's page
@@ -130,9 +184,12 @@ Planned for v0.2: `kb similar` (papers near this one), `kb excerpt`
 claude mcp add arxiv-kb -- kb mcp
 ```
 
-Tools exposed: `kb_search` (narrow/wide/filtered), `kb_get_paper`,
-`kb_add_note`. Drop [skill.md](./skill.md) into your Claude Code
-plugin folder so Claude knows when and how to use them.
+Tools exposed: `kb_search` (narrow/wide/filtered, including
+`kind`/`project` for idea recall), `kb_get_paper`, `kb_add_note`
+(paper annotations), and `kb_capture_idea` (standalone ideas keyed by
+project — the agent-side twin of `kb idea add`, with upsert semantics).
+Drop [skill.md](./skill.md) into your Claude Code plugin folder so
+Claude knows when and how to use them.
 
 ## Background watcher (optional)
 

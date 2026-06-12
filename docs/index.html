@@ -1,0 +1,572 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Knowledge Bank — your papers, Claude-ready</title>
+<style>
+  html, body { margin:0; height:100%; background:#04070d; overflow:hidden;
+    font-family:-apple-system, "SF Pro Display", "Segoe UI", Helvetica, Arial, sans-serif; }
+  #stage { position:fixed; inset:0; }
+  canvas { display:block; }
+
+  /* ---- splash ---- */
+  #splash { position:fixed; inset:0; z-index:30; display:flex; flex-direction:column;
+    align-items:center; justify-content:center; gap:18px; background:#04070d;
+    cursor:pointer; transition:opacity 1.2s ease; }
+  #splash.gone { opacity:0; pointer-events:none; }
+  #splash .logo { font-size:clamp(36px, 8vw, 64px); font-weight:200; letter-spacing:.06em; color:#dfe9f5; }
+  #splash .logo b { font-weight:700; color:#7fe9ff; }
+  #splash .play { width:84px; height:84px; border:1px solid rgba(127,233,255,.5);
+    border-radius:50%; display:flex; align-items:center; justify-content:center;
+    color:#7fe9ff; font-size:28px; transition:transform .3s ease, background .3s ease; }
+  #splash:hover .play { transform:scale(1.12); background:rgba(127,233,255,.08); }
+  #splash .hint { color:#5c708a; font-size:14px; letter-spacing:.2em; text-transform:uppercase; }
+
+  /* ---- captions ---- */
+  .cap { position:fixed; left:50%; transform:translateX(-50%); bottom:18vh; z-index:10;
+    color:#e8f1fb; font-size:clamp(20px, 3.2vw, 38px); font-weight:300; letter-spacing:.01em;
+    text-align:center; max-width:78vw; opacity:0; pointer-events:none;
+    text-shadow:0 2px 24px rgba(0,0,0,.8); }
+  .cap b { font-weight:650; color:#9beeff; }
+  .cap.sub { font-size:clamp(15px, 2vw, 22px); color:#9fb3c9; bottom:14vh; }
+  .cap.title-block { bottom:auto; top:50%; transform:translate(-50%,-50%); }
+  .title-block .big { font-size:clamp(40px, 7.5vw, 96px); font-weight:200; letter-spacing:.04em; }
+  .title-block .big b { font-weight:750; color:#7fe9ff; }
+  .title-block .tag { margin-top:14px; font-size:clamp(16px, 2.4vw, 26px); color:#c2d2e4; font-weight:300; }
+  .title-block .feats { margin-top:26px; font-size:clamp(12px, 1.5vw, 17px); color:#5f7b97;
+    letter-spacing:.28em; text-transform:uppercase; }
+  .title-block .install { margin-top:30px; font:500 clamp(13px,1.6vw,17px) ui-monospace, "SF Mono", Menlo, monospace;
+    color:#79e0a9; background:rgba(10,20,30,.7); border:1px solid rgba(121,224,169,.25);
+    padding:10px 22px; border-radius:8px; display:inline-block; }
+
+  #gh { position:fixed; top:17px; right:58px; z-index:31; color:#7fa0c0; font-size:13px;
+    letter-spacing:.12em; text-decoration:none; opacity:.8; }
+  #gh:hover { opacity:1; color:#9beeff; }
+
+  /* ---- terminal ---- */
+  #term { position:fixed; left:3vw; bottom:4vh; z-index:10; min-width:300px; max-width:46vw;
+    background:rgba(7,13,21,.82); border:1px solid rgba(110,150,190,.22); border-radius:10px;
+    padding:14px 18px 12px; font:13.5px/1.7 ui-monospace, "SF Mono", Menlo, monospace;
+    color:#cfe0f0; box-shadow:0 12px 40px rgba(0,0,0,.5); backdrop-filter:blur(6px);
+    opacity:0; transition:opacity .6s ease; }
+  #term.on { opacity:1; }
+  #term .bar { display:flex; gap:6px; margin-bottom:10px; }
+  #term .bar i { width:10px; height:10px; border-radius:50%; background:#2c3c50; }
+  #term .cmd { color:#eaf4ff; }
+  #term .cmd .ps { color:#7fe9ff; }
+  #term .ok { color:#79e0a9; }
+  #term .dim { color:#7186a0; }
+  #term .caret { display:inline-block; width:8px; height:15px; background:#7fe9ff;
+    vertical-align:text-bottom; animation:blink 1s steps(1) infinite; }
+  @keyframes blink { 50% { opacity:0; } }
+
+  /* ---- chrome ---- */
+  #fade { position:fixed; inset:0; z-index:20; background:#000; pointer-events:none; }
+  #prog { position:fixed; left:0; bottom:0; height:2px; width:0; z-index:25;
+    background:linear-gradient(90deg,#2a7fa8,#7fe9ff); }
+  #mute { position:fixed; top:18px; right:20px; z-index:25; color:#7fa0c0; cursor:pointer;
+    font-size:18px; opacity:.7; user-select:none; }
+  #mute:hover { opacity:1; }
+  #wm { position:fixed; top:20px; left:24px; z-index:25; color:#43586f; font-size:13px;
+    letter-spacing:.18em; text-transform:uppercase; }
+  #wm b { color:#7fa9c4; font-weight:600; }
+</style>
+</head>
+<body>
+<div id="stage"></div>
+
+<div id="wm"><b>Knowledge Bank</b> &nbsp;·&nbsp; for you and your agent</div>
+<a id="gh" href="https://github.com/sunprema/knowledge-bank" target="_blank" rel="noopener">GitHub&nbsp;↗</a>
+<div id="mute" title="toggle sound">🔊</div>
+<div id="term"><div class="bar"><i></i><i></i><i></i></div><div id="tlines"></div></div>
+<div id="caps"></div>
+<div id="prog"></div>
+<div id="fade"></div>
+
+<div id="splash">
+  <div class="logo">Knowledge <b>Bank</b></div>
+  <div class="play">▶</div>
+  <div class="hint">press to play — with sound</div>
+</div>
+
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+
+/* ============================== helpers ============================== */
+const DUR = 76;                       // loop length, seconds
+const sstep = (a, b, x) => { const u = Math.min(1, Math.max(0, (x - a) / (b - a))); return u * u * (3 - 2 * u); };
+const lerp  = (a, b, u) => a + (b - a) * u;
+let seed = 7;
+const rnd = () => { seed = (seed * 16807) % 2147483647; return (seed - 1) / 2147483646; };
+
+/* ============================== renderer ============================== */
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+document.getElementById('stage').appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x04070d);
+scene.fog = new THREE.FogExp2(0x04070d, 0.0075);
+
+const camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.1, 400);
+
+const composer = new EffectComposer(renderer);
+composer.addPass(new RenderPass(scene, camera));
+const bloom = new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), 1.15, 0.65, 0.55);
+composer.addPass(bloom);
+composer.addPass(new OutputPass());
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  composer.setSize(innerWidth, innerHeight);
+});
+
+/* ============================== starfield ============================== */
+{
+  const n = 1600, pos = new Float32Array(n * 3);
+  for (let i = 0; i < n; i++) {
+    const r = 120 + rnd() * 160, th = rnd() * Math.PI * 2, ph = Math.acos(2 * rnd() - 1);
+    pos[i*3]   = r * Math.sin(ph) * Math.cos(th);
+    pos[i*3+1] = r * Math.cos(ph) * 0.6;
+    pos[i*3+2] = r * Math.sin(ph) * Math.sin(th);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  scene.add(new THREE.Points(g, new THREE.PointsMaterial({
+    color: 0x9fb6d8, size: 0.55, sizeAttenuation: true, transparent: true, opacity: 0.75, fog: false })));
+}
+
+/* ============================== papers ============================== */
+function paperTexture() {
+  const c = document.createElement('canvas'); c.width = 128; c.height = 170;
+  const x = c.getContext('2d');
+  x.fillStyle = '#dde5ee'; x.fillRect(0, 0, 128, 170);
+  x.fillStyle = '#8fa3ba'; x.fillRect(14, 14, 100, 7);   // title
+  x.fillRect(14, 26, 72, 5);
+  x.fillStyle = '#b3c2d2';
+  for (let y = 44; y < 158; y += 9) x.fillRect(14, y, 14 + Math.floor(Math.random() * 86), 3.5);
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace;
+  return t;
+}
+const paperGeo = new THREE.PlaneGeometry(1.25, 1.65);
+const NPAPERS = 56;
+const HILIT = [5, 12, 21, 33];                       // search-hit papers
+const papers = [];
+for (let i = 0; i < NPAPERS; i++) {
+  const mat = new THREE.MeshBasicMaterial({ map: paperTexture(), side: THREE.DoubleSide });
+  const m = new THREE.Mesh(paperGeo, mat);
+  const r = 18 + rnd() * 40, th = rnd() * Math.PI * 2, ph = Math.acos(2 * rnd() - 1);
+  m.userData = {
+    chaos: new THREE.Vector3(r * Math.sin(ph) * Math.cos(th), (rnd() - 0.5) * 38, r * Math.sin(ph) * Math.sin(th)),
+    tumble: new THREE.Vector3(rnd() - .5, rnd() - .5, rnd() - .5).multiplyScalar(1.6),
+    ring: [13, 17, 21][i % 3],
+    a0: rnd() * Math.PI * 2,
+    spd: (0.05 + rnd() * 0.05) * (i % 2 ? 1 : -1),
+    yAmp: 0.6 + rnd() * 2.6,
+    yPh: rnd() * Math.PI * 2,
+    mStart: 20 + (i % 8) * 0.65,
+    baseCol: new THREE.Color(1, 1, 1),
+    hiCol: new THREE.Color(0.55, 1.85, 2.1),         // >1 → blooms when highlighted
+  };
+  m.rotation.set(rnd() * 6, rnd() * 6, rnd() * 6);
+  scene.add(m);
+  papers.push(m);
+}
+const hero = papers[0];
+const HERO_AT = new THREE.Vector3(0, 0.6, 5.5);
+
+/* ============================== ingest: typed sections ============================== */
+const SECTION_COLORS = [0x6ee7ff, 0xa78bfa, 0x34d399, 0xf472b6, 0xfbbf24, 0x60a5fa];
+const sections = SECTION_COLORS.map((col, i) => {
+  const m = new THREE.Mesh(new THREE.PlaneGeometry(0.85, 1.1),
+    new THREE.MeshBasicMaterial({ color: col, side: THREE.DoubleSide, transparent: true, opacity: 0.92 }));
+  const a = i / 6 * Math.PI * 2;
+  m.userData.home = new THREE.Vector3(HERO_AT.x + Math.cos(a) * 1.8, HERO_AT.y + Math.sin(a) * 1.8, HERO_AT.z);
+  m.scale.setScalar(0);
+  scene.add(m);
+  return m;
+});
+
+/* ============================== the index crystal (TurboVec core) ============================== */
+const crystal = new THREE.Group();
+const coreMat = new THREE.MeshBasicMaterial({ color: 0x7fe9ff });
+const core = new THREE.Mesh(new THREE.IcosahedronGeometry(1.35, 1), coreMat);
+const cage = new THREE.Mesh(new THREE.IcosahedronGeometry(2.15, 1),
+  new THREE.MeshBasicMaterial({ color: 0x2aa9d2, wireframe: true, transparent: true, opacity: 0.7 }));
+crystal.add(core, cage);
+{ // orbiting embedding-dust halo
+  const n = 320, pos = new Float32Array(n * 3);
+  for (let i = 0; i < n; i++) {
+    const r = 2.7 + rnd() * 1.3, th = rnd() * Math.PI * 2, ph = Math.acos(2 * rnd() - 1);
+    pos[i*3] = r * Math.sin(ph) * Math.cos(th); pos[i*3+1] = r * Math.cos(ph); pos[i*3+2] = r * Math.sin(ph) * Math.sin(th);
+  }
+  const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  crystal.add(new THREE.Points(g, new THREE.PointsMaterial({
+    color: 0x8ff0ff, size: 0.07, transparent: true, opacity: 0.8, blending: THREE.AdditiveBlending, depthWrite: false })));
+}
+scene.add(crystal);
+
+/* ============================== ingest particle stream ============================== */
+const NP = 620;
+const streamGeo = new THREE.BufferGeometry();
+streamGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(NP * 3), 3));
+const streamMat = new THREE.PointsMaterial({
+  color: 0x9bf0ff, size: 0.13, transparent: true, opacity: 0,
+  blending: THREE.AdditiveBlending, depthWrite: false });
+scene.add(new THREE.Points(streamGeo, streamMat));
+const streamP = [];
+for (let i = 0; i < NP; i++) {
+  const anchor = sections[i % 6].userData.home;
+  const s = anchor.clone().add(new THREE.Vector3((rnd()-.5)*.8, (rnd()-.5)*.8, (rnd()-.5)*.4));
+  const c = s.clone().lerp(new THREE.Vector3(0,0,0), 0.5)
+             .add(new THREE.Vector3((rnd()-.5)*4, (rnd()-.5)*4, (rnd()-.5)*2));
+  streamP.push({ s, c, ph: rnd(), spd: 0.55 + rnd() * 0.8 });
+}
+
+/* ============================== search pulses + hit beams ============================== */
+const PULSES = [37.0, 38.8, 40.6];
+const rings = PULSES.map(() => {
+  const m = new THREE.Mesh(new THREE.TorusGeometry(1, 0.035, 8, 96),
+    new THREE.MeshBasicMaterial({ color: 0x7fe9ff, transparent: true, opacity: 0,
+      blending: THREE.AdditiveBlending, depthWrite: false }));
+  m.rotation.x = Math.PI / 2;
+  scene.add(m);
+  return m;
+});
+const hitLines = HILIT.map(() => {
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(6), 3));
+  const l = new THREE.Line(g, new THREE.LineBasicMaterial({ color: 0x59d8ff, transparent: true, opacity: 0,
+    blending: THREE.AdditiveBlending }));
+  scene.add(l);
+  return l;
+});
+
+/* ============================== Claude orb + MCP beam ============================== */
+const orb = new THREE.Group();
+orb.add(new THREE.Mesh(new THREE.SphereGeometry(0.9, 32, 32), new THREE.MeshBasicMaterial({ color: 0xffc89e })));
+orb.add(new THREE.Mesh(new THREE.SphereGeometry(1.25, 32, 32),
+  new THREE.MeshBasicMaterial({ color: 0xff9d66, transparent: true, opacity: 0.22,
+    blending: THREE.AdditiveBlending, depthWrite: false })));
+scene.add(orb);
+const beam = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.07, 1, 10, 1, true),
+  new THREE.MeshBasicMaterial({ color: 0xffb27a, transparent: true, opacity: 0,
+    blending: THREE.AdditiveBlending, depthWrite: false }));
+scene.add(beam);
+const orbLines = HILIT.map(() => {
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(6), 3));
+  const l = new THREE.Line(g, new THREE.LineBasicMaterial({ color: 0xffc09a, transparent: true, opacity: 0,
+    blending: THREE.AdditiveBlending }));
+  scene.add(l);
+  return l;
+});
+const UP = new THREE.Vector3(0, 1, 0);
+function placeBeam(mesh, a, b, radiusScale) {
+  const d = b.clone().sub(a);
+  mesh.position.copy(a).addScaledVector(d, 0.5);
+  mesh.quaternion.setFromUnitVectors(UP, d.clone().normalize());
+  mesh.scale.set(radiusScale, d.length(), radiusScale);
+}
+
+/* ============================== camera timeline ============================== */
+const CAMK = [
+  { t: 0,    p: [0, 3, 72],     l: [0, 0, 0] },
+  { t: 9,    p: [7, 3, 30],     l: [0, 0, 2] },
+  { t: 12.5, p: [2.5, 1.8, 15], l: [0, .6, 5.5] },
+  { t: 17,   p: [-3.5, 2.2, 17],l: [0, .4, 2] },
+  { t: 22,   p: [0, 7, 32],     l: [0, 0, 0] },
+  { t: 30,   p: [14, 9, 34],    l: [0, 0, 0] },
+  { t: 38,   p: [18, 7, 28],    l: [0, 0, 0] },
+  { t: 46,   p: [-12, 6, 30],   l: [0, 0, 0] },
+  { t: 52,   p: [-5, 5, 23],    l: [3, 2, 5] },
+  { t: 60,   p: [0, 12, 42],    l: [0, 0, 0] },
+  { t: 76,   p: [26, 15, 52],   l: [0, 0, 0] },
+];
+const _p = new THREE.Vector3(), _l = new THREE.Vector3();
+function placeCamera(t) {
+  let i = 0;
+  while (i < CAMK.length - 2 && t >= CAMK[i + 1].t) i++;
+  const a = CAMK[i], b = CAMK[i + 1];
+  const u = sstep(a.t, b.t, t);
+  _p.fromArray(a.p).lerp(new THREE.Vector3().fromArray(b.p), u);
+  _l.fromArray(a.l).lerp(new THREE.Vector3().fromArray(b.l), u);
+  // hand-held drift so it never feels static
+  _p.x += Math.sin(t * 0.31) * 0.5; _p.y += Math.sin(t * 0.21 + 2) * 0.35;
+  camera.position.copy(_p);
+  camera.lookAt(_l);
+}
+
+/* ============================== captions (pure function of t) ============================== */
+const titleHTML = `
+  <div class="big">Knowledge <b>Bank</b></div>
+  <div class="tag">A single Rust binary. Your papers, Claude-ready.</div>
+  <div class="feats">add · search · notes · ideas · inbox · watch · mcp</div>
+  <div class="install">cargo install --git https://github.com/sunprema/knowledge-bank &nbsp;&amp;&amp;&nbsp; kb init</div>`;
+const CAPS = [
+  { t: 2.2,  d: 4.2, h: 'Your research is <b>scattered</b>.' },
+  { t: 6.4,  d: 3.4, h: 'Papers. PDFs. Web posts. Fifty open tabs.', cls: 'sub' },
+  { t: 14.5, d: 6.0, h: '<b>One command.</b> Fetched · parsed · embedded · indexed.' },
+  { t: 24.0, d: 6.5, h: 'Every paper becomes <b>typed, searchable sections</b> — abstract, method, limitations, future&nbsp;work.' },
+  { t: 31.0, d: 3.2, h: '<code>kb watch</code> — drop a PDF in the inbox, it ingests itself.', cls: 'sub' },
+  { t: 38.5, d: 4.6, h: 'Search by <b>meaning</b> — not keywords.' },
+  { t: 43.8, d: 3.8, h: 'Every hit <b>deep-links</b> to the exact PDF page.' },
+  { t: 51.0, d: 7.0, h: '<b>Claude reads your whole library</b> over MCP — search, synthesize, capture ideas.' },
+  { t: 62.0, d: 12.0, h: titleHTML, cls: 'title-block' },
+];
+const capsRoot = document.getElementById('caps');
+for (const c of CAPS) {
+  c.el = document.createElement('div');
+  c.el.className = 'cap' + (c.cls ? ' ' + c.cls : '');
+  c.el.innerHTML = c.h;
+  capsRoot.appendChild(c.el);
+}
+function updateCaps(t) {
+  for (const c of CAPS)
+    c.el.style.opacity = (sstep(c.t, c.t + 0.7, t) * (1 - sstep(c.t + c.d - 0.7, c.t + c.d, t))).toFixed(3);
+}
+
+/* ============================== terminal (pure function of t) ============================== */
+const TERM = [
+  { t: 9.8,  clear: true },
+  { t: 10.2, cmd: 'kb add 2504.19874', cps: 16 },
+  { t: 12.6, out: '✓ TurboQuant: Online Vector Quantization…', cls: 'ok' },
+  { t: 13.3, out: '  19 chunks · typed sections · embedded · indexed', cls: 'dim' },
+  { t: 14.0, out: '  done in 2.4s — notes template created', cls: 'dim' },
+  { t: 33.4, clear: true },
+  { t: 33.9, cmd: 'kb search "online vector quantization"', cps: 19 },
+  { t: 37.3, out: '3 papers · 8 chunks · ranked by meaning', cls: 'ok' },
+  { t: 38.2, out: '↳ paper.pdf#page=5 — straight to the page', cls: 'dim' },
+  { t: 47.2, clear: true },
+  { t: 47.7, cmd: 'claude mcp add arxiv-kb -- kb mcp', cps: 20 },
+  { t: 50.6, out: '✓ connected — kb_search · kb_get_paper · kb_capture_idea', cls: 'ok' },
+  { t: 59.6, clear: true },
+];
+const termBox = document.getElementById('term');
+const tlines = document.getElementById('tlines');
+function updateTerm(t) {
+  let from = 0;
+  for (let i = 0; i < TERM.length; i++) if (TERM[i].clear && TERM[i].t <= t) from = i + 1;
+  let html = '', any = false;
+  for (let i = from; i < TERM.length; i++) {
+    const c = TERM[i];
+    if (c.clear || c.t > t) continue;
+    any = true;
+    if (c.cmd) {
+      const n = Math.min(c.cmd.length, Math.floor((t - c.t) * c.cps));
+      const typing = n < c.cmd.length;
+      html += `<div class="cmd"><span class="ps">$ </span>${c.cmd.slice(0, n)}${typing ? '<span class="caret"></span>' : ''}</div>`;
+    } else {
+      html += `<div class="${c.cls}">${c.out}</div>`;
+    }
+  }
+  tlines.innerHTML = html;
+  termBox.classList.toggle('on', any);
+}
+
+/* ============================== audio ============================== */
+let actx = null, master = null, muted = false;
+function initAudio() {
+  actx = new (window.AudioContext || window.webkitAudioContext)();
+  master = actx.createGain(); master.gain.value = 0.9; master.connect(actx.destination);
+  const pad = actx.createGain(); pad.gain.value = 0.045;
+  const lp = actx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 420; lp.Q.value = 0.8;
+  pad.connect(lp); lp.connect(master);
+  for (const [type, f] of [['sine', 55], ['sine', 82.6], ['triangle', 110.4]]) {
+    const o = actx.createOscillator(); o.type = type; o.frequency.value = f; o.connect(pad); o.start();
+  }
+  const lfo = actx.createOscillator(); lfo.frequency.value = 0.07;
+  const lfoG = actx.createGain(); lfoG.gain.value = 240;
+  lfo.connect(lfoG); lfoG.connect(lp.frequency); lfo.start();
+}
+function chime(freq, vol = 0.1, dur = 1.4) {
+  if (!actx || muted) return;
+  const o = actx.createOscillator(); o.type = 'sine'; o.frequency.value = freq;
+  const g = actx.createGain();
+  g.gain.setValueAtTime(vol, actx.currentTime);
+  g.gain.exponentialRampToValueAtTime(0.0001, actx.currentTime + dur);
+  o.connect(g); g.connect(master); o.start(); o.stop(actx.currentTime + dur);
+}
+document.getElementById('mute').addEventListener('click', e => {
+  muted = !muted;
+  if (master) master.gain.value = muted ? 0 : 0.9;
+  e.target.textContent = muted ? '🔇' : '🔊';
+});
+
+/* one-shot events (chimes), reset each loop */
+const EVENTS = [
+  { t: 10.4, fn: () => chime(330, 0.07) },
+  { t: 15.2, fn: () => chime(440, 0.09, 2.2) },
+  { t: 37.0, fn: () => chime(660, 0.09) },
+  { t: 38.8, fn: () => chime(784, 0.08) },
+  { t: 40.6, fn: () => chime(880, 0.07) },
+  { t: 50.2, fn: () => chime(494, 0.08, 2) },
+  { t: 62.2, fn: () => { chime(523, 0.07, 3); chime(659, 0.06, 3); chime(784, 0.05, 3); } },
+];
+
+/* ============================== the big update ============================== */
+const _v = new THREE.Vector3(), _o = new THREE.Vector3();
+function update(t, dt) {
+  placeCamera(t);
+
+  /* --- crystal: powers up during ingest --- */
+  const power = 0.18 + 0.82 * sstep(15, 22, t);
+  const breathe = 1 + Math.sin(t * 2.1) * 0.03 * power;
+  crystal.scale.setScalar(lerp(0.45, 1, power) * breathe);
+  coreMat.color.setRGB(0.5 * power + power * power * 1.6, power * 1.6 + 0.3, power * 1.9 + 0.35);
+  crystal.rotation.y += dt * 0.25;
+  cage.rotation.x += dt * 0.1;
+
+  /* --- papers: chaos → constellation, search highlights --- */
+  const hi = sstep(37.5, 39.5, t) * (1 - sstep(58, 61, t));
+  for (let i = 0; i < NPAPERS; i++) {
+    const m = papers[i], u = m.userData;
+    const mm = sstep(u.mStart, u.mStart + 5, t);
+    const ang = u.a0 + t * u.spd;
+    _o.set(Math.cos(ang) * u.ring, u.yAmp * Math.sin(ang * 2 + u.yPh), Math.sin(ang) * u.ring);
+    m.position.copy(u.chaos).lerp(_o, mm);
+    const f = lerp(1, 0.1, mm);
+    m.rotation.x += u.tumble.x * dt * f;
+    m.rotation.y += u.tumble.y * dt * f;
+    m.rotation.z += u.tumble.z * dt * f;
+    if (HILIT.includes(i)) m.material.color.copy(u.baseCol).lerp(u.hiCol, hi);
+  }
+
+  /* --- hero paper: flies in at `kb add`, dissolves, rejoins the constellation --- */
+  const fly = sstep(10.5, 12.5, t);
+  if (t < 21) {
+    hero.position.copy(hero.userData.chaos).lerp(HERO_AT, fly);
+    hero.scale.setScalar(1.25 * (1 - sstep(13, 14.6, t)));
+    if (fly > 0) hero.rotation.set(lerp(hero.rotation.x, 0, fly * .2), lerp(hero.rotation.y, 0, fly * .2), 0);
+  } else {
+    hero.scale.setScalar(1.25 * sstep(21, 23, t));
+  }
+
+  /* --- typed sections fan out, then shrink into the stream --- */
+  sections.forEach((s, i) => {
+    const grow = sstep(13 + i * 0.09, 14 + i * 0.09, t) * (1 - sstep(17.5, 19, t));
+    s.scale.setScalar(grow);
+    s.position.copy(HERO_AT).lerp(s.userData.home, sstep(13, 14.5, t));
+    s.lookAt(camera.position);
+  });
+
+  /* --- ingest particle stream → crystal --- */
+  const sw = sstep(14.5, 15.5, t) * (1 - sstep(20.5, 21.8, t));
+  streamMat.opacity = sw;
+  if (sw > 0) {
+    const arr = streamGeo.attributes.position.array;
+    for (let i = 0; i < NP; i++) {
+      const p = streamP[i];
+      const u = ((t - 14.5) * p.spd * 0.45 + p.ph) % 1;
+      const w = 1 - u;
+      _v.set(
+        w * w * p.s.x + 2 * w * u * p.c.x,
+        w * w * p.s.y + 2 * w * u * p.c.y,
+        w * w * p.s.z + 2 * w * u * p.c.z);
+      arr[i*3] = _v.x; arr[i*3+1] = _v.y; arr[i*3+2] = _v.z;
+    }
+    streamGeo.attributes.position.needsUpdate = true;
+  }
+
+  /* --- search pulses + beams to hits --- */
+  rings.forEach((r, i) => {
+    const u = (t - PULSES[i]) / 2.4;
+    if (u > 0 && u < 1) { r.scale.setScalar(1 + u * 34); r.material.opacity = 0.85 * (1 - u); }
+    else r.material.opacity = 0;
+  });
+  hitLines.forEach((l, k) => {
+    const m = papers[HILIT[k]];
+    const g = sstep(38.5 + k * 0.25, 40 + k * 0.25, t) * (1 - sstep(58, 60.5, t));
+    const a = l.geometry.attributes.position.array;
+    a[0] = a[1] = a[2] = 0;
+    _v.copy(m.position).multiplyScalar(g);
+    a[3] = _v.x; a[4] = _v.y; a[5] = _v.z;
+    l.geometry.attributes.position.needsUpdate = true;
+    l.material.opacity = g * (0.55 + 0.3 * Math.sin(t * 6 + k));
+  });
+
+  /* --- Claude orb arrives over MCP --- */
+  const arrive = sstep(48, 52, t), leave = sstep(60, 63, t);
+  _o.set(lerp(46, 9, arrive) + lerp(0, 30, leave),
+         lerp(16, 4.5, arrive) + Math.sin(t * 1.3) * 0.4 + lerp(0, 10, leave),
+         lerp(-14, 11, arrive));
+  orb.position.copy(_o);
+  orb.scale.setScalar(Math.max(0.001, arrive * (1 - leave)));
+  const bw = sstep(51.5, 52.5, t) * (1 - sstep(58.5, 60, t));
+  beam.material.opacity = bw * (0.5 + 0.25 * Math.sin(t * 9));
+  if (bw > 0) placeBeam(beam, orb.position, crystal.position, 1 + Math.sin(t * 9) * 0.3);
+  else beam.scale.setScalar(0.001);
+  orbLines.forEach((l, k) => {
+    const g = sstep(53 + k * 0.2, 54 + k * 0.2, t) * (1 - sstep(57.5, 59, t));
+    const a = l.geometry.attributes.position.array;
+    a[0] = orb.position.x; a[1] = orb.position.y; a[2] = orb.position.z;
+    const m = papers[HILIT[k]];
+    _v.copy(orb.position).lerp(m.position, g);
+    a[3] = _v.x; a[4] = _v.y; a[5] = _v.z;
+    l.geometry.attributes.position.needsUpdate = true;
+    l.material.opacity = g * 0.5;
+  });
+
+  /* --- overlays --- */
+  updateCaps(t);
+  updateTerm(t);
+  document.getElementById('fade').style.opacity =
+    (1 - sstep(0, 1.6, t)) + sstep(DUR - 2, DUR - 0.1, t);
+  document.getElementById('prog').style.width = (t / DUR * 100) + '%';
+}
+
+/* ============================== run loop ============================== */
+let started = false, t0 = 0, tPrev = 0, offset = 0;
+const clock = new THREE.Clock();
+
+function frame() {
+  requestAnimationFrame(frame);
+  const now = clock.getElapsedTime();
+  let t = started ? ((now - t0 + offset) % DUR) : 0.01;
+  const dt = Math.min(0.05, clock.getDelta() + 0.0001) || 0.016;
+  if (t < tPrev) for (const e of EVENTS) e.fired = false;        // loop wrapped
+  if (started) for (const e of EVENTS) {
+    if (!e.fired && t >= e.t && t < e.t + 1) { e.fired = true; e.fn(); }
+  }
+  tPrev = t;
+  update(t, dt);
+  composer.render();
+}
+frame();
+
+document.getElementById('splash').addEventListener('click', function () {
+  if (started) return;
+  started = true;
+  t0 = clock.getElapsedTime();
+  this.classList.add('gone');
+  try { initAudio(); } catch (e) { /* visuals carry the ad */ }
+});
+
+/* keys 1–6 jump between scenes (handy for demos) */
+const JUMPS = [0, 10, 22, 34, 48, 60];
+addEventListener('keydown', e => {
+  const k = parseInt(e.key, 10);
+  if (started && k >= 1 && k <= JUMPS.length) {
+    offset = JUMPS[k - 1];
+    t0 = clock.getElapsedTime();
+    for (const ev of EVENTS) ev.fired = ev.t < JUMPS[k - 1];
+  }
+});
+</script>
+</body>
+</html>

@@ -1,4 +1,4 @@
-# CONFIG.md — configuring arxiv-kb
+# CONFIG.md — configuring Knowledge Bank (`kb`)
 
 How the KB locates its data, every knob in `config.toml`, and the
 portable USB-drive setup this KB actually runs in.
