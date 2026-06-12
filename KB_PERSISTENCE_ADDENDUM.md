@@ -407,20 +407,27 @@ helper via SIGKILL plus a controlled write barrier.
 
 ---
 
-## 13. Open questions specific to persistence
+## 13. Persistence decisions (resolved 2026-06-12)
 
-- [ ] **Should we keep historical index versions for rollback?** E.g.
-      keep last 3 `index.tv.N` files as snapshots. Probably no — the
-      user can always reindex. Adds complexity for unclear value.
-- [ ] **Should config changes (bit_width, embedding model) automatically
-      trigger reindex?** Currently they don't; the user must run
-      `kb reindex` manually. Reasonable to keep this explicit.
-- [ ] **WAL mode for meta.db?** SQLite's WAL is faster for our
-      write pattern but adds two sidecar files. Leaning yes — it's
-      the standard recommendation for single-writer apps.
-- [ ] **`kb verify` command** that does the consistency check on
-      demand without restart? Probably yes, low effort, high
-      diagnostic value.
+Resolved with the user before v0.1 implementation began.
+
+- [x] **Historical index snapshots for rollback**: no. Canonical files
+      + the embedding cache make `kb reindex` a cheap, complete
+      recovery path, and reindex already keeps a `.backup` during the
+      rebuild itself.
+- [x] **Config changes triggering reindex**: never automatic. A config
+      fingerprint is stored in meta.db; vector-incompatible changes
+      (embedding model/dim, bit_width) refuse queries until
+      `kb reindex`, chunking-only changes (chunk_max_tokens) serve
+      with a warning. See PRD section 16.
+- [x] **WAL mode for meta.db**: yes. Better write performance, readers
+      don't block the writer (matters when `kb watch` + `kb mcp` run
+      simultaneously). The `-wal`/`-shm` sidecars are already in the
+      folder layout (section 10).
+- [x] **`kb verify` command**: yes, in v0.1 alongside `kb status`.
+      Exposes the startup consistency check (section 7) on demand,
+      plus a full chunk-by-chunk check behind `--deep`. Also gives the
+      test suite a natural assertion hook.
 
 ---
 

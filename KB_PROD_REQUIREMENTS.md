@@ -1191,29 +1191,45 @@ behind `ENABLE_E2E=1` so PRs don't hit arXiv every push.
 
 ---
 
-## 16. Open questions to resolve before v0.1
+## 16. Design decisions (resolved 2026-06-12)
 
-These are the design choices not locked in yet. Implementer (Claude
-Code) should ask before guessing on these.
+All open questions were resolved with the user before v0.1
+implementation began. These are now locked decisions.
 
-- [ ] **Notes.md format**: free-form markdown vs. structured prompts
-      (the template with "Why interesting?", "What would I build?")
-- [ ] **Section classifier when headings are ambiguous**: fall through
-      to `Other`, or use LLM-based classification for ambiguous cases?
-- [ ] **Re-embedding on chunk_max_tokens change**: do we reindex
-      automatically, prompt the user, or refuse?
-- [ ] **Notes chunk weighting**: scale notes vectors slightly so they
-      rank higher? Or trust embedding similarity directly?
-- [ ] **PDF assembly in v0.2**: include cover page with synthesis
-      summary, or just concatenate raw page ranges?
-- [ ] **`kb add` blocking vs background**: block by default with a
-      progress bar, or fire-and-forget with watcher catching up?
-      Leaning blocking with progress (more predictable).
-- [ ] **Tag storage**: in metadata.json (canonical, hand-editable) or
-      in meta.db (derived, queryable)? Leaning metadata.json.
-- [ ] **Schema version 1 vs 2 migration policy**: refuse to read
-      newer index, or attempt forward-compatible degraded mode?
-      Leaning refuse with a clear error.
+- [x] **Notes.md format**: prompted template, free-form body. Create
+      notes.md with the guiding questions as HTML comments (as in
+      section 4 step 7), but treat content as free-form markdown.
+      Strip HTML comments before embedding so untouched prompts never
+      pollute the vectors.
+- [x] **Section classifier when headings are ambiguous**: fall through
+      to `Other`. Deterministic, offline, free. `kb stats` reports the
+      Other ratio; revisit with an LLM pass only if it exceeds ~25%
+      on the real corpus.
+- [x] **Config changes affecting the index** (chunk_max_tokens,
+      embedding model, bit_width): detect via a config fingerprint
+      stored in meta.db; reindex stays manual. Vector-incompatible
+      changes (embedding model/dim, bit_width) refuse queries with
+      "run `kb reindex`"; chunking-only changes serve with a one-line
+      warning. Never auto-reindex.
+- [x] **Notes chunk weighting**: none in v0.1. Pure cosine scores —
+      predictable and debuggable. Notes are written in the user's own
+      query vocabulary, so they rank well naturally. Revisit only with
+      evidence from real usage.
+- [x] **PDF assembly in v0.2**: generated cover page (excerpt list:
+      paper title, section, source pages, compile date) + raw page
+      ranges. No AI-written synthesis summary (anti-goal: we don't
+      precompute summarization).
+- [x] **`kb add` blocking vs background**: blocking with live
+      per-step progress (metadata → source → pandoc → PDF → embed →
+      index). Failures surface immediately; matches the
+      rollback-on-failure design.
+- [x] **Tag storage**: metadata.json is canonical (hand-editable,
+      survives reindex); mirrored into meta.db at ingest/reindex time
+      for fast filtered search. The mirror is a derived artifact.
+- [x] **Schema version migration policy**: refuse to read a newer
+      schema, printing both versions and the two remedies (upgrade
+      the binary, or `kb reindex`). No forward-compatible degraded
+      mode.
 
 ---
 
