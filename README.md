@@ -128,6 +128,36 @@ ideas that apply across every project, then recall with
 `--kind note --project <current> --project global`. `--link <id>`
 records related papers/ideas.
 
+### Reflections (cross-paper synthesis)
+
+```bash
+kb reflect --title "Memory architectures across agent frameworks" \
+           --scope 2304.03442 --scope 2509.25140 \
+           --tags memory,agents
+kb reflect --title "Quantization trade-offs" --body -   # pipe body via stdin
+kb reflect --title "Attention variants"                 # opens $EDITOR with template
+```
+
+A reflection is a higher-level synthesis document distilled from several
+papers. It is stored with `section_type = reflection` and embedded
+immediately, so future `kb_search` calls and `--section reflection`
+surface it alongside raw paper chunks — today's synthesis compounds
+into tomorrow's context.
+
+`--scope` records the paper ids that informed the reflection (repeatable;
+stored as `links` in `metadata.json`). When `--body` is omitted,
+`$EDITOR` opens a template pre-seeded with the scoped papers' titles
+and guiding sections (Themes, Contradictions, Combined ideas).
+
+The id is derived from the title with a `reflection-` prefix
+(`reflection-memory-architectures-across-agent-frameworks`), and
+works everywhere an arXiv id does (`kb show`, `kb tag`, `kb remove`).
+
+```bash
+kb search "agent memory" --section reflection           # retrieve stored reflections
+kb search "agent memory" --wide                         # reflections surface here too
+```
+
 ### Notes and tags
 
 ```bash
@@ -184,12 +214,23 @@ Planned for v0.2: `kb similar` (papers near this one), `kb excerpt`
 claude mcp add arxiv-kb -- kb mcp
 ```
 
-Tools exposed: `kb_search` (narrow/wide/filtered, including
-`kind`/`project` for idea recall), `kb_get_paper`, `kb_add_note`
-(paper annotations), and `kb_capture_idea` (standalone ideas keyed by
-project — the agent-side twin of `kb idea add`, with upsert semantics).
+Tools exposed:
+
+| Tool | Purpose |
+|---|---|
+| `kb_search` | Narrow/wide/filtered semantic search (supports `section_types`, `kind`, `project`) |
+| `kb_get_paper` | Full metadata + notes for a specific document |
+| `kb_add_note` | Append a note to a paper and re-embed immediately |
+| `kb_capture_idea` | Agent-side twin of `kb idea add` — upserts standalone ideas by project |
+| `kb_create_reflection` | Save a cross-paper synthesis reflection; indexed as `reflection` chunks and retrieved by future searches |
+
 Drop [skill.md](./skill.md) into your Claude Code plugin folder so
 Claude knows when and how to use them.
+
+Typical agent flow for synthesis: `kb_search(mode='wide')` → read
+chunks → `kb_create_reflection(title, body, scope=[...paper_ids])`.
+The reflection is embedded on save; subsequent `kb_search` calls
+retrieve it as a first-class result alongside raw paper sections.
 
 ## Background watcher (optional)
 

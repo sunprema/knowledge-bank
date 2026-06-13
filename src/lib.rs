@@ -41,14 +41,16 @@ pub enum SourceFormat {
     Html,
 }
 
-/// Document kind: arXiv/local papers vs standalone idea notes. Defaults to
-/// `Paper` so pre-existing metadata.json files need no migration.
+/// Document kind: arXiv/local papers vs standalone idea notes vs cross-paper
+/// reflections. Defaults to `Paper` so pre-existing metadata.json files need
+/// no migration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DocKind {
     #[default]
     Paper,
     Note,
+    Reflection,
 }
 
 impl DocKind {
@@ -56,6 +58,7 @@ impl DocKind {
         match self {
             DocKind::Paper => "paper",
             DocKind::Note => "note",
+            DocKind::Reflection => "reflection",
         }
     }
 
@@ -63,6 +66,7 @@ impl DocKind {
         match s {
             "paper" => Some(DocKind::Paper),
             "note" => Some(DocKind::Note),
+            "reflection" => Some(DocKind::Reflection),
             _ => None,
         }
     }
@@ -135,7 +139,9 @@ impl PaperMetadata {
 }
 
 /// Closed section-type enum (PRD §4 step 6). Ambiguous headings fall through
-/// to `Other` (resolved decision — deterministic, no ML).
+/// to `Other` (resolved decision — deterministic, no ML). `Reflection` is a
+/// synthetic type produced by `kb reflect` / `kb_create_reflection` — not
+/// classified from headings but written directly by the user or Claude.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SectionType {
@@ -149,11 +155,12 @@ pub enum SectionType {
     FutureWork,
     Conclusion,
     UserNotes,
+    Reflection,
     Other,
 }
 
 impl SectionType {
-    pub const ALL: [SectionType; 11] = [
+    pub const ALL: [SectionType; 12] = [
         SectionType::Abstract,
         SectionType::Introduction,
         SectionType::Background,
@@ -164,6 +171,7 @@ impl SectionType {
         SectionType::FutureWork,
         SectionType::Conclusion,
         SectionType::UserNotes,
+        SectionType::Reflection,
         SectionType::Other,
     ];
 
@@ -179,6 +187,7 @@ impl SectionType {
             SectionType::FutureWork => "future_work",
             SectionType::Conclusion => "conclusion",
             SectionType::UserNotes => "user_notes",
+            SectionType::Reflection => "reflection",
             SectionType::Other => "other",
         }
     }

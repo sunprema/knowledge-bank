@@ -264,6 +264,10 @@ impl KbPaths {
     pub fn idea_path(&self, id: &str) -> PathBuf {
         self.paper_dir(id).join("idea.md")
     }
+    /// Canonical body of a cross-paper reflection (`kind = reflection`).
+    pub fn reflection_path(&self, id: &str) -> PathBuf {
+        self.paper_dir(id).join("reflection.md")
+    }
 
     /// Paper folders = direct children of root containing a metadata.json
     /// (skips `.arxiv-kb` and anything else). Sorted for stable output.

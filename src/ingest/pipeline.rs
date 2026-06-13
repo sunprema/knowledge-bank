@@ -430,6 +430,108 @@ pub async fn ingest_idea(
     })
 }
 
+/// One `kb reflect` / MCP `kb_create_reflection` payload.
+#[derive(Debug, Clone)]
+pub struct ReflectionSpec {
+    /// Explicit id; derived from title when absent (prefixed with "reflection-").
+    pub slug: Option<String>,
+    pub title: String,
+    pub body: String,
+    /// paper_ids this reflection draws from (stored as `links` in metadata).
+    pub scope: Vec<String>,
+    pub tags: Vec<String>,
+}
+
+/// Create (or update) a cross-paper synthesis reflection: write the canonical
+/// folder (metadata.json + reflection.md), then embed and index it.
+/// Re-calling with the same id updates in place.
+pub async fn ingest_reflection(
+    paths: &KbPaths,
+    config: &Config,
+    spec: &ReflectionSpec,
+    progress: &dyn Fn(&str),
+) -> Result<IngestReport, KbError> {
+    let t0 = Instant::now();
+    let raw_slug = slug_from_filename(&spec.title)?;
+    let id = match &spec.slug {
+        Some(s) => s.clone(),
+        None => {
+            if raw_slug.starts_with("reflection-") {
+                raw_slug
+            } else {
+                format!("reflection-{raw_slug}")
+            }
+        }
+    };
+
+    if spec.body.trim().is_empty() {
+        return Err(KbError::Usage("reflection body must not be empty".to_string()));
+    }
+
+    let existing = PaperMetadata::load(&paths.metadata_path(&id)).ok();
+    if let Some(old) = &existing
+        && old.kind != DocKind::Reflection
+    {
+        return Err(KbError::Usage(format!(
+            "{id} already names a non-reflection document; choose a different title"
+        )));
+    }
+
+    let now = now_rfc3339();
+    let meta = PaperMetadata {
+        arxiv_id: id.clone(),
+        kind: DocKind::Reflection,
+        project: None,
+        links: spec.scope.clone(),
+        version: None,
+        title: spec.title.clone(),
+        authors: Vec::new(),
+        abstract_text: String::new(),
+        categories: Vec::new(),
+        published_at: String::new(),
+        updated_at: now.clone(),
+        ingested_at: existing.as_ref().map_or(now, |old| old.ingested_at.clone()),
+        source_format: SourceFormat::Markdown,
+        source_url: None,
+        main_tex: None,
+        tags: match (&existing, spec.tags.is_empty()) {
+            (Some(old), true) => old.tags.clone(),
+            _ => spec.tags.clone(),
+        },
+        schema_version: crate::SCHEMA_VERSION,
+    };
+
+    progress("writing reflection");
+    std::fs::create_dir_all(paths.paper_dir(&id))
+        .map_err(|e| io_err("create reflection folder", e))?;
+    std::fs::write(paths.reflection_path(&id), spec.body.trim_end().to_string() + "\n")
+        .map_err(|e| io_err("write reflection.md", e))?;
+    meta.save(&paths.metadata_path(&id))?;
+
+    progress("embedding and indexing");
+    let db = MetaDb::open(&paths.meta_db_path())?;
+    let mut index = VectorIndex::open_or_create(
+        &paths.index_path(),
+        config.embedding.dimensions,
+        config.turbovec.bit_width,
+    )?;
+    let (n_chunks, cache_hits) = index_paper_from_disk(paths, config, &db, &mut index, &id).await?;
+
+    let elapsed = t0.elapsed().as_secs_f64();
+    log_line(
+        paths,
+        &format!("created reflection {id}: {n_chunks} chunks ({elapsed:.1}s)"),
+    );
+    Ok(IngestReport {
+        paper_id: id,
+        title: meta.title,
+        chunks: n_chunks,
+        cache_hits,
+        source_format: SourceFormat::Markdown,
+        elapsed_secs: elapsed,
+    })
+}
+
 /// Filename stem → paper id for local PDFs: lowercase ASCII alphanumerics,
 /// every other run of characters collapsed to a single hyphen.
 /// "Attention Is All You Need.pdf" → "attention-is-all-you-need". Dots
@@ -478,6 +580,7 @@ async fn index_and_report(
         sections_md.as_deref(),
         &meta.abstract_text,
         notes_md.as_deref(),
+        None,
         config.ingest.chunk_max_tokens,
     )?;
     let pages = assign_pages(&chunks, &toc);
@@ -523,17 +626,18 @@ pub async fn index_paper_from_disk(
 ) -> Result<(usize, usize), KbError> {
     let meta = PaperMetadata::load(&paths.metadata_path(paper_id))?;
 
-    let sections_md = if meta.kind == DocKind::Note {
-        // An idea's body is its canonical content — no PDF, no sections.md.
-        std::fs::read_to_string(paths.idea_path(paper_id)).ok()
-    } else {
-        // sections.md is derived; if it's missing but the PDF survives,
-        // regenerate it (addendum §8 step 5b).
-        let sections_path = paths.sections_path(paper_id);
-        if !sections_path.exists() && paths.pdf_path(paper_id).exists() {
-            write_sections_from_pdf(&paths.pdf_path(paper_id), &sections_path)?;
+    let (sections_md, reflection_md) = match meta.kind {
+        DocKind::Note => (std::fs::read_to_string(paths.idea_path(paper_id)).ok(), None),
+        DocKind::Reflection => {
+            (None, std::fs::read_to_string(paths.reflection_path(paper_id)).ok())
         }
-        std::fs::read_to_string(&sections_path).ok()
+        DocKind::Paper => {
+            let sections_path = paths.sections_path(paper_id);
+            if !sections_path.exists() && paths.pdf_path(paper_id).exists() {
+                write_sections_from_pdf(&paths.pdf_path(paper_id), &sections_path)?;
+            }
+            (std::fs::read_to_string(&sections_path).ok(), None)
+        }
     };
     let notes_md = std::fs::read_to_string(paths.notes_path(paper_id)).ok();
 
@@ -541,12 +645,12 @@ pub async fn index_paper_from_disk(
         sections_md.as_deref(),
         &meta.abstract_text,
         notes_md.as_deref(),
+        reflection_md.as_deref(),
         config.ingest.chunk_max_tokens,
     )?;
 
-    // Pages come from a PDF outline; ideas (markdown) and web pages (HTML)
-    // have none. Keying on the PDF's existence covers all three uniformly.
-    let has_pdf = meta.kind != DocKind::Note && paths.pdf_path(paper_id).exists();
+    // Pages come from a PDF outline; notes and reflections have none.
+    let has_pdf = meta.kind == DocKind::Paper && paths.pdf_path(paper_id).exists();
     let toc = if has_pdf {
         pdf::extract_toc(&paths.pdf_path(paper_id)).unwrap_or_default()
     } else {
@@ -771,7 +875,7 @@ fn assign_pages(chunks: &[RawChunk], toc: &[crate::TocEntry]) -> Vec<Option<u32>
     let mut out = Vec::with_capacity(chunks.len());
     let mut last: Option<u32> = Some(1);
     for chunk in chunks {
-        if chunk.section_type == SectionType::UserNotes {
+        if matches!(chunk.section_type, SectionType::UserNotes | SectionType::Reflection) {
             out.push(None);
             continue;
         }

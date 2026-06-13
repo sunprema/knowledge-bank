@@ -69,6 +69,21 @@ enum Command {
         #[command(subcommand)]
         cmd: IdeaCmd,
     },
+    /// Write a cross-paper synthesis reflection and index it as `reflection` chunks
+    Reflect {
+        /// Reflection title (also derives the storage id)
+        #[arg(long)]
+        title: String,
+        /// Body text, '-' for stdin; omit to compose in $EDITOR
+        #[arg(long)]
+        body: Option<String>,
+        /// paper ids that informed this reflection (repeatable)
+        #[arg(long)]
+        scope: Vec<String>,
+        /// Tags (comma-separated)
+        #[arg(long, value_delimiter = ',')]
+        tags: Vec<String>,
+    },
     /// Add (+tag) or remove (-tag) tags on a paper
     Tag {
         arxiv_id: String,
@@ -250,6 +265,9 @@ async fn run(cli: Cli) -> Result<(), KbError> {
                 links,
             } => commands::idea_add(&kb, project, title, body, tags, links).await,
         },
+        Command::Reflect { title, body, scope, tags } => {
+            commands::reflect(&kb, title, body, scope, tags).await
+        }
         Command::Tag { arxiv_id, tags } => commands::tag(&kb, arxiv_id, tags),
         Command::Search {
             query,

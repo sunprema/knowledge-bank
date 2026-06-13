@@ -169,6 +169,93 @@ pub async fn idea_add(
     run_ingest(kb, IngestInput::Idea(spec)).await
 }
 
+/// `kb reflect` — write a cross-paper synthesis reflection, then index it.
+/// Opens `$EDITOR` with a template pre-seeded with guiding questions and
+/// (when `--scope` paper ids are given) the titles of those papers so the
+/// user has context while writing.
+pub async fn reflect(
+    kb: &Kb,
+    title: String,
+    body: Option<String>,
+    scope: Vec<String>,
+    tags: Vec<String>,
+) -> Result<(), KbError> {
+    let body = match body.as_deref() {
+        Some("-") => {
+            let mut buf = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)
+                .map_err(|e| KbError::Usage(format!("cannot read body from stdin: {e}")))?;
+            buf
+        }
+        Some(text) => text.to_string(),
+        None => compose_reflection_in_editor(&title, &scope, &kb.paths)?,
+    };
+    let spec = pipeline::ReflectionSpec {
+        slug: None,
+        title,
+        body,
+        scope,
+        tags,
+    };
+    run_ingest(kb, IngestInput::Reflection(spec)).await
+}
+
+fn compose_reflection_in_editor(
+    title: &str,
+    scope: &[String],
+    paths: &crate::config::KbPaths,
+) -> Result<String, KbError> {
+    let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
+    let tmp = tempfile::Builder::new()
+        .prefix("kb-reflect-")
+        .suffix(".md")
+        .tempfile()
+        .map_err(|e| KbError::Usage(format!("cannot create temp file: {e}")))?;
+
+    let mut seed = String::new();
+    if !scope.is_empty() {
+        seed.push_str("<!-- Papers in scope:\n");
+        for id in scope {
+            let meta_path = paths.metadata_path(id);
+            if let Ok(meta) = PaperMetadata::load(&meta_path) {
+                seed.push_str(&format!("  [{id}] {}\n", meta.title));
+            } else {
+                seed.push_str(&format!("  {id}\n"));
+            }
+        }
+        seed.push_str("-->\n\n");
+    }
+    seed.push_str(&format!("<!-- Reflection: {title} -->\n\n"));
+    seed.push_str("## Themes\n\n\n## Contradictions\n\n\n## Combined ideas\n\n\n");
+
+    std::fs::write(tmp.path(), &seed)
+        .map_err(|e| KbError::Usage(format!("cannot seed temp file: {e}")))?;
+
+    let status = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!("{editor} \"$1\""))
+        .arg("kb-reflect")
+        .arg(tmp.path())
+        .status()
+        .map_err(|e| KbError::Usage(format!("cannot launch $EDITOR ({editor}): {e}")))?;
+    if !status.success() {
+        return Err(KbError::Usage(format!("$EDITOR exited with {status}")));
+    }
+    let raw = std::fs::read_to_string(tmp.path())
+        .map_err(|e| KbError::Usage(format!("cannot read back temp file: {e}")))?;
+    let body: String = raw
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("<!--"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if body.trim().is_empty() {
+        return Err(KbError::Usage(
+            "reflection body is empty; nothing to save".to_string(),
+        ));
+    }
+    Ok(body)
+}
+
 /// Open $EDITOR on a temp file pre-seeded with the idea title; returns the
 /// composed body (the seed heading stripped if left untouched).
 fn compose_in_editor(title: &str) -> Result<String, KbError> {
@@ -205,6 +292,7 @@ enum IngestInput {
     Url { input: String, refetch: bool },
     LocalPdf(PathBuf),
     Idea(pipeline::IdeaSpec),
+    Reflection(pipeline::ReflectionSpec),
 }
 
 async fn run_ingest(kb: &Kb, job: IngestInput) -> Result<(), KbError> {
@@ -234,6 +322,9 @@ async fn run_ingest(kb: &Kb, job: IngestInput) -> Result<(), KbError> {
         }
         IngestInput::Idea(spec) => {
             pipeline::ingest_idea(&kb.paths, &kb.config, spec, &progress).await
+        }
+        IngestInput::Reflection(spec) => {
+            pipeline::ingest_reflection(&kb.paths, &kb.config, spec, &progress).await
         }
     };
     if let Some(s) = &spinner {

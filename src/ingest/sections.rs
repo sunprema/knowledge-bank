@@ -76,6 +76,10 @@ pub fn strip_html_comments(md: &str) -> String {
 ///   favor of the API abstract.
 /// - `notes_md` (when present) becomes `user_notes` chunks after
 ///   [`strip_html_comments`]; if nothing but whitespace remains, no chunk.
+/// - `reflection_md` (when present) becomes `reflection` chunk(s); used for
+///   cross-paper synthesis documents created by `kb reflect` /
+///   `kb_create_reflection` — no heading classification, whole text is one
+///   typed unit.
 /// - Any chunk over `chunk_max_tokens` (see [`crate::approx_tokens`]) is
 ///   split at paragraph boundaries (`\n\n`), sub-chunks keep the section
 ///   type and heading, ordinals increment within the section type.
@@ -87,6 +91,7 @@ pub fn build_chunks(
     sections_md: Option<&str>,
     abstract_text: &str,
     notes_md: Option<&str>,
+    reflection_md: Option<&str>,
     chunk_max_tokens: usize,
 ) -> Result<Vec<RawChunk>, KbError> {
     let mut builder = ChunkBuilder::new(chunk_max_tokens);
@@ -121,6 +126,13 @@ pub fn build_chunks(
             .unwrap_or(&stripped);
         if !body_without_title.trim().is_empty() {
             builder.add_section(SectionType::UserNotes, None, &stripped);
+        }
+    }
+
+    if let Some(reflection) = reflection_md {
+        let text = reflection.trim();
+        if !text.is_empty() {
+            builder.add_section(SectionType::Reflection, None, text);
         }
     }
 
@@ -421,7 +433,7 @@ mod tests {
     #[test]
     fn abstract_always_from_api_text() {
         let md = "# Abstract\n\nPandoc's mangled abstract.\n\n# Introduction\n\nIntro text.\n";
-        let chunks = build_chunks(Some(md), "The clean API abstract.", None, 2000).unwrap();
+        let chunks = build_chunks(Some(md), "The clean API abstract.", None, None, 2000).unwrap();
         let abstracts: Vec<_> = chunks
             .iter()
             .filter(|c| c.section_type == SectionType::Abstract)
@@ -435,7 +447,7 @@ mod tests {
     #[test]
     fn preamble_before_first_heading_is_other() {
         let md = "Title line emitted by pandoc.\n\n# Introduction\n\nIntro body.\n";
-        let chunks = build_chunks(Some(md), "Abs.", None, 2000).unwrap();
+        let chunks = build_chunks(Some(md), "Abs.", None, None, 2000).unwrap();
         assert_eq!(chunks[0].section_type, SectionType::Abstract);
         assert_eq!(chunks[1].section_type, SectionType::Other);
         assert_eq!(chunks[1].heading, None);
@@ -447,7 +459,7 @@ mod tests {
     #[test]
     fn chunk_id_format() {
         let md = "# Method\n\nHow it works.\n\n# Conclusion\n\nThe end.\n";
-        let chunks = build_chunks(Some(md), "Abs.", Some("My note."), 2000).unwrap();
+        let chunks = build_chunks(Some(md), "Abs.", Some("My note."), None, 2000).unwrap();
         assert_eq!(
             ids(&chunks),
             vec![
@@ -462,7 +474,7 @@ mod tests {
     #[test]
     fn notes_become_user_notes_after_comment_stripping() {
         let notes = "# Notes on TurboQuant\n\n<!-- Why is this interesting to me? -->\n\nGreat for edge embedding search.\n";
-        let chunks = build_chunks(None, "Abs.", Some(notes), 2000).unwrap();
+        let chunks = build_chunks(None, "Abs.", Some(notes), None, 2000).unwrap();
         let notes_chunks: Vec<_> = chunks
             .iter()
             .filter(|c| c.section_type == SectionType::UserNotes)
@@ -475,7 +487,7 @@ mod tests {
     #[test]
     fn untouched_notes_template_produces_no_chunk() {
         let notes = "<!-- Why is this interesting to me? -->\n\n\n<!-- What would I build with this? -->\n\n\n";
-        let chunks = build_chunks(None, "Abs.", Some(notes), 2000).unwrap();
+        let chunks = build_chunks(None, "Abs.", Some(notes), None, 2000).unwrap();
         assert!(
             chunks.iter().all(|c| c.section_type != SectionType::UserNotes),
             "whitespace-only notes must not produce a chunk"
@@ -485,14 +497,14 @@ mod tests {
     #[test]
     fn empty_sections_are_dropped() {
         let md = "# Method\n\n\n# Conclusion\n\nDone.\n";
-        let chunks = build_chunks(Some(md), "Abs.", None, 2000).unwrap();
+        let chunks = build_chunks(Some(md), "Abs.", None, None, 2000).unwrap();
         assert!(chunks.iter().all(|c| c.section_type != SectionType::Method));
         assert!(chunks.iter().any(|c| c.section_type == SectionType::Conclusion));
     }
 
     #[test]
     fn empty_abstract_is_dropped() {
-        let chunks = build_chunks(None, "   \n ", None, 2000).unwrap();
+        let chunks = build_chunks(None, "   \n ", None, None, 2000).unwrap();
         assert!(chunks.is_empty());
     }
 
@@ -504,7 +516,7 @@ mod tests {
         let para_b = "b".repeat(400);
         let para_c = "c".repeat(400);
         let md = format!("# Method\n\n{para_a}\n\n{para_b}\n\n{para_c}\n");
-        let chunks = build_chunks(Some(&md), "Abs.", None, 150).unwrap();
+        let chunks = build_chunks(Some(&md), "Abs.", None, None, 150).unwrap();
         let method: Vec<_> = chunks
             .iter()
             .filter(|c| c.section_type == SectionType::Method)
@@ -526,7 +538,7 @@ mod tests {
         // 4 paragraphs of ~25 tokens each, budget 60 => two per chunk.
         let p = "x".repeat(100);
         let md = format!("# Method\n\n{p}\n\n{p}\n\n{p}\n\n{p}\n");
-        let chunks = build_chunks(Some(&md), "Abs.", None, 60).unwrap();
+        let chunks = build_chunks(Some(&md), "Abs.", None, None, 60).unwrap();
         let method: Vec<_> = chunks
             .iter()
             .filter(|c| c.section_type == SectionType::Method)
@@ -539,7 +551,7 @@ mod tests {
     fn single_huge_paragraph_stays_whole() {
         let para = "z".repeat(2000); // 500 tokens, no \n\n inside
         let md = format!("# Method\n\n{para}\n");
-        let chunks = build_chunks(Some(&md), "Abs.", None, 100).unwrap();
+        let chunks = build_chunks(Some(&md), "Abs.", None, None, 100).unwrap();
         let method: Vec<_> = chunks
             .iter()
             .filter(|c| c.section_type == SectionType::Method)
@@ -551,7 +563,7 @@ mod tests {
     #[test]
     fn ordinals_increment_across_same_type_sections() {
         let md = "# Method\n\nFirst.\n\n# Our Approach\n\nSecond.\n";
-        let chunks = build_chunks(Some(md), "Abs.", None, 2000).unwrap();
+        let chunks = build_chunks(Some(md), "Abs.", None, None, 2000).unwrap();
         let method: Vec<_> = chunks
             .iter()
             .filter(|c| c.section_type == SectionType::Method)
@@ -566,7 +578,7 @@ mod tests {
     #[test]
     fn h1_h2_h3_split_but_h4_does_not() {
         let md = "## Method\n\nTop.\n\n#### Inner detail\n\nStill method.\n\n### Evaluation\n\nEval.\n";
-        let chunks = build_chunks(Some(md), "Abs.", None, 2000).unwrap();
+        let chunks = build_chunks(Some(md), "Abs.", None, None, 2000).unwrap();
         let method: Vec<_> = chunks
             .iter()
             .filter(|c| c.section_type == SectionType::Method)
@@ -580,7 +592,7 @@ mod tests {
     #[test]
     fn hashes_inside_code_fences_do_not_split() {
         let md = "# Method\n\n```bash\n# not a heading\n```\n\nAfter fence.\n";
-        let chunks = build_chunks(Some(md), "Abs.", None, 2000).unwrap();
+        let chunks = build_chunks(Some(md), "Abs.", None, None, 2000).unwrap();
         let method: Vec<_> = chunks
             .iter()
             .filter(|c| c.section_type == SectionType::Method)
@@ -593,7 +605,7 @@ mod tests {
     #[test]
     fn pandoc_attribute_blocks_are_stripped_from_headings() {
         let md = "# Introduction {#sec:intro}\n\nBody.\n";
-        let chunks = build_chunks(Some(md), "Abs.", None, 2000).unwrap();
+        let chunks = build_chunks(Some(md), "Abs.", None, None, 2000).unwrap();
         let intro = chunks
             .iter()
             .find(|c| c.section_type == SectionType::Introduction)
@@ -603,7 +615,7 @@ mod tests {
 
     #[test]
     fn no_sections_md_yields_abstract_and_notes_only() {
-        let chunks = build_chunks(None, "Abs.", Some("A thought."), 2000).unwrap();
+        let chunks = build_chunks(None, "Abs.", Some("A thought."), None, 2000).unwrap();
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[0].section_type, SectionType::Abstract);
         assert_eq!(chunks[1].section_type, SectionType::UserNotes);

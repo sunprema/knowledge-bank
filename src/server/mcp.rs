@@ -178,6 +178,29 @@ fn tool_definitions() -> Value {
                 },
                 "required": ["paper_id", "note"]
             }
+        },
+        {
+            "name": "kb_create_reflection",
+            "description": "Save a cross-paper synthesis reflection to the KB. Call this after using kb_search(mode='wide') to gather papers on a theme and synthesising insights across them. The reflection is indexed with section_type='reflection' and retrieved by future kb_search calls — so today's synthesis compounds into tomorrow's. Re-calling with the same title updates the reflection in place.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "title": {
+                        "type": "string",
+                        "description": "Short title for this reflection (e.g. 'Memory architectures across agent frameworks')"
+                    },
+                    "body": {
+                        "type": "string",
+                        "description": "The synthesis text in markdown. Cover: themes across papers, contradictions, combined ideas, and cite source paper ids."
+                    },
+                    "scope": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "paper_ids this reflection draws from (used to build the scope record)"
+                    }
+                },
+                "required": ["title", "body"]
+            }
         }
     ])
 }
@@ -193,6 +216,7 @@ async fn call_tool(
         "kb_get_paper" => tool_get_paper(paths, args),
         "kb_add_note" => tool_add_note(paths, config, args).await,
         "kb_capture_idea" => tool_capture_idea(paths, config, args).await,
+        "kb_create_reflection" => tool_create_reflection(paths, config, args).await,
         other => Err(KbError::Usage(format!("unknown tool: {other}"))),
     }
 }
@@ -340,6 +364,31 @@ async fn tool_capture_idea(
         "id": report.paper_id,
         "title": report.title,
         "chunks": report.chunks,
+    });
+    serde_json::to_string_pretty(&payload)
+        .map_err(|e| KbError::Index(format!("serialize result: {e}")))
+}
+
+async fn tool_create_reflection(
+    paths: &KbPaths,
+    config: &Config,
+    args: &Value,
+) -> Result<String, KbError> {
+    let spec = pipeline::ReflectionSpec {
+        slug: None,
+        title: str_arg(args, "title")?,
+        body: str_arg(args, "body")?,
+        scope: str_list(args, "scope").unwrap_or_default(),
+        tags: Vec::new(),
+    };
+    let report = pipeline::ingest_reflection(paths, config, &spec, &|_msg| {}).await?;
+    let payload = json!({
+        "id": report.paper_id,
+        "title": report.title,
+        "chunks": report.chunks,
+        "message": format!(
+            "Reflection saved. Retrieve in future sessions with kb_search(section_types=['reflection'])."
+        ),
     });
     serde_json::to_string_pretty(&payload)
         .map_err(|e| KbError::Index(format!("serialize result: {e}")))
