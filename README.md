@@ -101,8 +101,9 @@ kb search "quantization" --tag consumer -k 20
 kb search "payment lane" --kind note --project kitgig --project global
 ```
 
-Search is semantic — it matches meaning, not keywords, so vocabulary
-drift across papers doesn't matter. Two modes: **narrow** (default,
+Search is primarily semantic — it matches meaning, so vocabulary drift
+across papers doesn't matter (and a lexical pass, below, still catches
+exact terms). Two modes: **narrow** (default,
 top 10, drops weak matches below the score floor) for "find me the
 paper/section about X", and **wide** (`--wide`, top 40, no floor) for
 synthesis questions where you want broad material to reason over.
@@ -110,15 +111,24 @@ synthesis questions where you want broad material to reason over.
 the search. Results are grouped per paper, each chunk with its score,
 section type, snippet, and a `file://…#page=N` deep link into the PDF.
 
-Ranking isn't cosine-only. Following the Generative Agents retrieval
-model (arXiv:2304.03442, in this very corpus), each candidate is scored
-on a blend of **relevance** (cosine), **recency** (recently added/edited
-material decays slowly upward), and **importance** (a section-type prior
-— your reflections and notes outrank raw paper prose, `future_work`
-outranks background). Relevance stays dominant; recency and importance
-break near-ties so freshly captured and high-value material surfaces.
-The cosine floor still gates candidates first, so it remains a true
-relevance floor. Tune or disable the weights under `[search.ranking]`
+Retrieval is **hybrid**: a dense (vector) ranking fused with a lexical
+**BM25** ranking — a SQLite FTS5 index over chunk text — via Reciprocal
+Rank Fusion. Pure semantic search misses exact-token queries (an author
+name, a method name like `QJL`, an arXiv id); BM25 nails those, and
+fusion gets the strengths of both. The reported `score` is then a small
+RRF value — judge results by order, not magnitude. Turn it off
+(`[search.hybrid] enabled = false`) for pure dense search.
+
+The dense side isn't cosine-only either. Following the Generative Agents
+retrieval model (arXiv:2304.03442, in this very corpus), each candidate
+is scored on a blend of **relevance** (cosine), **recency** (recently
+added/edited material decays slowly upward), and **importance** (a
+section-type prior — your reflections and notes outrank raw paper prose,
+`future_work` outranks background). Relevance stays dominant; recency
+and importance break near-ties so freshly captured and high-value
+material surfaces, and this ordering feeds the fusion above. The cosine
+floor still gates dense candidates first, so it remains a true relevance
+floor. Tune the weights under `[search.ranking]` / `[search.hybrid]`
 (see [CONFIG.md](./CONFIG.md)).
 
 ### Capturing ideas

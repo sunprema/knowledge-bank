@@ -7,7 +7,7 @@ use crate::index::{consistency_check, MetaDb, VectorIndex};
 use crate::{deep_link, ChunkRecord, DocKind, KbError, PaperMetadata, SectionType};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -232,24 +232,91 @@ pub async fn search(
         .map(|(id, _)| *id as i64)
         .collect();
 
-    // Blend relevance + recency + importance, rerank, keep top `k`. The
-    // reported `score` is this blended value — what the ordering is on.
+    // Dense candidates, each scored by the recency/importance blend (#1).
+    // This ordering is the dense input to fusion, and the standalone ranking
+    // when hybrid is off. Records are cached for reuse across both paths.
     let now = Utc::now();
-    let mut ranked_records: Vec<(ChunkRecord, f32)> = db
-        .chunks_by_vector_ids(&ordered_ids)?
-        .into_iter()
-        .filter_map(|rec| {
-            let relevance = *cosine.get(&rec.vector_id)?;
-            let recency = recency_factor(&rec.embedded_at, now, ranking.recency_half_life_days);
-            let importance = rec.section_type.importance_prior();
-            let blended = ranking.relevance_weight * relevance
-                + ranking.recency_weight * recency
-                + ranking.importance_weight * importance;
-            Some((rec, blended))
-        })
-        .collect();
-    ranked_records.sort_by(|a, b| b.1.total_cmp(&a.1));
-    ranked_records.truncate(k);
+    let mut records: HashMap<i64, ChunkRecord> = HashMap::new();
+    let mut dense_scored: Vec<(i64, f32)> = Vec::new();
+    for rec in db.chunks_by_vector_ids(&ordered_ids)? {
+        let Some(&relevance) = cosine.get(&rec.vector_id) else {
+            continue;
+        };
+        let recency = recency_factor(&rec.embedded_at, now, ranking.recency_half_life_days);
+        let importance = rec.section_type.importance_prior();
+        let blended = ranking.relevance_weight * relevance
+            + ranking.recency_weight * recency
+            + ranking.importance_weight * importance;
+        dense_scored.push((rec.vector_id, blended));
+        records.insert(rec.vector_id, rec);
+    }
+    // Tiebreak on vector_id so equal scores rank deterministically.
+    dense_scored.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+
+    let hybrid = &config.search.hybrid;
+    let ranked_records: Vec<(ChunkRecord, f32)> = if !hybrid.enabled {
+        // Dense-only: the blended score is the reported score (== #1).
+        dense_scored
+            .into_iter()
+            .take(k)
+            .filter_map(|(id, s)| records.remove(&id).map(|rec| (rec, s)))
+            .collect()
+    } else {
+        // Fuse dense + lexical (BM25) rankings via Reciprocal Rank Fusion.
+        // The dense rank already carries recency/importance, so those signals
+        // survive fusion; BM25 adds the exact-token matches dense embeddings
+        // miss. The reported `score` is the RRF score.
+        let dense_rank: HashMap<i64, usize> = dense_scored
+            .iter()
+            .enumerate()
+            .map(|(i, (id, _))| (*id, i))
+            .collect();
+
+        // Lexical candidates, restricted to the same filter allowlist so
+        // --section/--tag/--kind/--project/--paper apply uniformly.
+        let allow: Option<HashSet<i64>> =
+            allowlist.as_ref().map(|v| v.iter().map(|&x| x as i64).collect());
+        let lex_ids: Vec<i64> = db
+            .lexical_search(query, pool_k)?
+            .into_iter()
+            .filter(|id| allow.as_ref().is_none_or(|s| s.contains(id)))
+            .collect();
+        let lex_rank: HashMap<i64, usize> =
+            lex_ids.iter().enumerate().map(|(i, id)| (*id, i)).collect();
+
+        // Hydrate records for lexical-only ids (dense ones are already loaded).
+        let missing: Vec<i64> = lex_ids
+            .iter()
+            .copied()
+            .filter(|id| !records.contains_key(id))
+            .collect();
+        for rec in db.chunks_by_vector_ids(&missing)? {
+            records.insert(rec.vector_id, rec);
+        }
+
+        // RRF: Σ weight / (rrf_k + 1-based rank) over the lists a chunk is in.
+        let mut fused: Vec<(i64, f32)> = records
+            .keys()
+            .copied()
+            .filter(|id| dense_rank.contains_key(id) || lex_rank.contains_key(id))
+            .map(|id| {
+                let mut s = 0.0;
+                if let Some(&r) = dense_rank.get(&id) {
+                    s += hybrid.dense_weight / (hybrid.rrf_k + (r + 1) as f32);
+                }
+                if let Some(&r) = lex_rank.get(&id) {
+                    s += hybrid.lexical_weight / (hybrid.rrf_k + (r + 1) as f32);
+                }
+                (id, s)
+            })
+            .collect();
+        fused.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+        fused.truncate(k);
+        fused
+            .into_iter()
+            .filter_map(|(id, s)| records.remove(&id).map(|rec| (rec, s)))
+            .collect()
+    };
 
     // Group by paper, preserving rank order of first appearance.
     let mut groups: Vec<PaperGroup> = Vec::new();

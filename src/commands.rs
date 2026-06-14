@@ -477,7 +477,7 @@ pub async fn search(
             }
             for (i, paper) in response.papers.iter().enumerate() {
                 println!(
-                    "{}. {}  ({})  best {:.2}",
+                    "{}. {}  ({})  best {:.3}",
                     i + 1,
                     paper.paper.title,
                     paper.paper_id,
@@ -492,7 +492,7 @@ pub async fn search(
                         .map(|p| format!(" p.{p}"))
                         .unwrap_or_default();
                     println!(
-                        "   • [{:.2}] {}{} — {}",
+                        "   • [{:.3}] {}{} — {}",
                         chunk.score, chunk.section_type, page, chunk.snippet
                     );
                     println!("     {}", chunk.deep_link);

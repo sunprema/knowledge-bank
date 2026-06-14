@@ -71,6 +71,7 @@ pub struct SearchConfig {
     pub default_min_score_narrow: f32,
     pub default_min_score_wide: f32,
     pub ranking: RankingConfig,
+    pub hybrid: HybridConfig,
 }
 
 impl Default for SearchConfig {
@@ -84,6 +85,40 @@ impl Default for SearchConfig {
             default_min_score_narrow: 0.30,
             default_min_score_wide: 0.0,
             ranking: RankingConfig::default(),
+            hybrid: HybridConfig::default(),
+        }
+    }
+}
+
+/// Hybrid retrieval: fuse the dense (vector) ranking with a lexical (BM25 /
+/// SQLite FTS5) ranking via Reciprocal Rank Fusion. Dense embeddings miss
+/// exact-token queries — an author name, a method name, an arXiv id, a rare
+/// symbol — which BM25 nails; fusion gets the strengths of both. The dense
+/// side is ranked by the [`RankingConfig`] blend, so recency/importance still
+/// flow through into the fused result.
+///
+/// RRF score for a chunk = `Σ weight_i / (rrf_k + rank_i)` over the rankings
+/// it appears in (1-based rank). It combines ranks, not raw scores, so the
+/// two incomparable score scales (cosine vs. BM25) never need calibrating.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HybridConfig {
+    /// `false` ⇒ dense-only (the [`RankingConfig`] blend, unchanged).
+    pub enabled: bool,
+    pub dense_weight: f32,
+    pub lexical_weight: f32,
+    /// RRF dampening constant (the standard value is 60): larger ⇒ flatter,
+    /// so deep ranks still contribute and no single list dominates the top.
+    pub rrf_k: f32,
+}
+
+impl Default for HybridConfig {
+    fn default() -> Self {
+        HybridConfig {
+            enabled: true,
+            dense_weight: 1.0,
+            lexical_weight: 1.0,
+            rrf_k: 60.0,
         }
     }
 }

@@ -81,6 +81,12 @@ importance_weight = 0.10            # section-type prior
 recency_half_life_days = 180        # age at which the recency term halves
 candidate_multiplier = 4            # over-fetch k×N, blend, keep top k
 
+[search.hybrid]                     # dense + lexical (BM25) fusion
+enabled = true                      # false ⇒ dense-only (the ranking blend)
+dense_weight = 1.0                  # RRF weight for the vector ranking
+lexical_weight = 1.0                # RRF weight for the BM25 ranking
+rrf_k = 60                          # RRF dampening constant (standard: 60)
+
 [ingest]
 chunk_max_tokens = 2000
 prefer_latex = true
@@ -110,6 +116,18 @@ near-ties; set any weight to `0` to disable that signal, or all three
 (`recency_weight`/`importance_weight` = 0) for cosine-only behavior. This is
 the Generative Agents retrieval model (arXiv:2304.03442), which the KB
 already holds.
+
+**Hybrid note:** with `[search.hybrid] enabled` (the default), search fuses
+the dense (vector) ranking with a lexical **BM25** ranking from a SQLite FTS5
+index over chunk text, via **Reciprocal Rank Fusion** (`score = Σ weight /
+(rrf_k + rank)`). Dense embeddings miss exact-token queries — an author name,
+a method name like `QJL`, an arXiv id — which BM25 nails; fusion gets both.
+The dense side is still ranked by the `[search.ranking]` blend, so
+recency/importance flow through. Because RRF combines *ranks*, the reported
+`score` is a small RRF value (≈0.01–0.03), not a cosine — judge results by
+order, not magnitude. Set `enabled = false` for pure dense behavior. The
+lexical index is built automatically; a KB created before this feature
+backfills it on first open (no `kb reindex` needed).
 
 **Config-change policy (locked design decision):** changing
 `embedding.model`, `dimensions`, or `bit_width` makes existing vectors

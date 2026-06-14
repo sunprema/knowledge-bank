@@ -79,6 +79,15 @@ CREATE TABLE IF NOT EXISTS documents (
   kind     TEXT NOT NULL,
   project  TEXT
 );
+
+-- Lexical (BM25) sibling of the vector index, for hybrid retrieval. A
+-- standalone FTS5 table whose rowid mirrors chunks.id, so a lexical hit maps
+-- straight to a vector id. `porter` stemming + `unicode61` keep BM25 robust to
+-- morphology and punctuation. Kept in sync by insert_chunk / delete_chunks.
+CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
+  text,
+  tokenize = 'porter unicode61'
+);
 ";
 
 const PERSISTENT_SCHEMA: &str = "
@@ -120,6 +129,20 @@ fn row_to_chunk(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChunkRecord> {
         embedding_model: row.get(10)?,
         embedding_version: row.get(11)?,
     })
+}
+
+/// Turn a raw user query into a safe FTS5 `MATCH` expression: split on
+/// whitespace, drop tokens with no alphanumeric character, quote each
+/// remaining token as a string literal (doubling embedded quotes), and OR
+/// them. Quoting neutralizes FTS5 operators/punctuation in the input, and the
+/// OR makes it a bag-of-words match (recall-oriented; BM25 does the ranking).
+fn fts5_or_query(query: &str) -> String {
+    query
+        .split_whitespace()
+        .filter(|t| t.chars().any(|c| c.is_alphanumeric()))
+        .map(|t| format!("\"{}\"", t.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(" OR ")
 }
 
 /// `?, ?, ?` placeholder list of length `n` (n >= 1).
@@ -211,7 +234,29 @@ impl MetaDb {
             }
             None => db.meta_set("schema_version", &SCHEMA_VERSION.to_string())?,
         }
+        db.backfill_fts_if_needed()?;
         Ok(db)
+    }
+
+    /// Populate the lexical index from `chunks` when it's out of sync — the
+    /// migration path for a KB created before `chunks_fts` existed (its rows
+    /// predate the sync hooks in `insert_chunk`). A no-op once counts match,
+    /// so it's cheap to call on every open and hybrid search Just Works
+    /// without forcing `kb reindex`.
+    fn backfill_fts_if_needed(&self) -> Result<(), KbError> {
+        let chunks: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))?;
+        let indexed: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM chunks_fts", [], |r| r.get(0))?;
+        if chunks != indexed {
+            self.conn.execute_batch(
+                "DELETE FROM chunks_fts; \
+                 INSERT INTO chunks_fts (rowid, text) SELECT id, text FROM chunks;",
+            )?;
+        }
+        Ok(())
     }
 
     // ---- explicit transactions (the pipeline drives the addendum §5
@@ -252,7 +297,33 @@ impl MetaDb {
                 chunk.embedding_version,
             ],
         )?;
-        Ok(self.conn.last_insert_rowid())
+        let id = self.conn.last_insert_rowid();
+        // Mirror into the lexical index (rowid = chunks.id) for hybrid search.
+        self.conn.execute(
+            "INSERT INTO chunks_fts (rowid, text) VALUES (?1, ?2)",
+            rusqlite::params![id, chunk.text],
+        )?;
+        Ok(id)
+    }
+
+    /// BM25-ranked lexical search over chunk text, best match first. `query`
+    /// is the raw user string; it's tokenized into an OR of quoted terms so
+    /// FTS5 operators/punctuation in the input can't error or be interpreted.
+    /// Returns vector ids (= chunks.id); empty if the query has no usable
+    /// terms. The caller intersects with any filter allowlist.
+    pub fn lexical_search(&self, query: &str, limit: usize) -> Result<Vec<i64>, KbError> {
+        let match_query = fts5_or_query(query);
+        if match_query.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut stmt = self.conn.prepare(
+            "SELECT rowid FROM chunks_fts WHERE chunks_fts MATCH ?1 \
+             ORDER BY bm25(chunks_fts) LIMIT ?2",
+        )?;
+        let ids = stmt
+            .query_map(rusqlite::params![match_query, limit as i64], |r| r.get(0))?
+            .collect::<rusqlite::Result<Vec<i64>>>()?;
+        Ok(ids)
     }
 
     pub fn chunk_by_chunk_id(&self, chunk_id: &str) -> Result<Option<ChunkRecord>, KbError> {
@@ -300,6 +371,12 @@ impl MetaDb {
         let ids: Vec<i64> = stmt
             .query_map([paper_id], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
+        // Drop the lexical-index rows too (rowid = chunks.id), so the FTS
+        // index never outlives the chunks it mirrors.
+        for id in &ids {
+            self.conn
+                .execute("DELETE FROM chunks_fts WHERE rowid = ?1", [id])?;
+        }
         self.conn
             .execute("DELETE FROM chunks WHERE paper_id = ?1", [paper_id])?;
         Ok(ids)
@@ -549,6 +626,7 @@ impl MetaDb {
     pub fn reset_derived_tables(&self) -> Result<(), KbError> {
         self.conn.execute_batch(
             "DROP TABLE IF EXISTS chunks; \
+             DROP TABLE IF EXISTS chunks_fts; \
              DROP TABLE IF EXISTS pdf_toc; \
              DROP TABLE IF EXISTS paper_tags; \
              DROP TABLE IF EXISTS documents;",
@@ -640,6 +718,47 @@ mod tests {
             embedding_model: "text-embedding-3-small".to_string(),
             embedding_version: crate::EMBEDDING_VERSION,
         }
+    }
+
+    #[test]
+    fn fts5_or_query_quotes_terms_and_drops_punctuation() {
+        assert_eq!(fts5_or_query("online vector"), "\"online\" OR \"vector\"");
+        // Pure-punctuation tokens are dropped; quotes are doubled.
+        assert_eq!(fts5_or_query("foo ( ) bar"), "\"foo\" OR \"bar\"");
+        assert_eq!(fts5_or_query("say \"hi\""), "\"say\" OR \"\"\"hi\"\"\"");
+        assert_eq!(fts5_or_query("   "), "");
+    }
+
+    #[test]
+    fn lexical_search_ranks_by_bm25_and_survives_operators() {
+        let (_dir, db) = open_temp();
+        db.insert_chunk(&new_chunk(
+            "p1",
+            SectionType::Method,
+            0,
+            "online vector quantization for nearest neighbor search",
+        ))
+        .unwrap();
+        db.insert_chunk(&new_chunk("p2", SectionType::Abstract, 0, "a paper about cats"))
+            .unwrap();
+
+        // Raw query with FTS5-special chars must not error.
+        let hits = db.lexical_search("vector quantization OR (cats)", 10).unwrap();
+        assert_eq!(hits.first(), Some(&1), "the quantization chunk should rank first");
+        assert!(hits.contains(&2), "the OR-matched cats chunk should still appear");
+
+        // No usable terms ⇒ empty, no error.
+        assert!(db.lexical_search("()", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn delete_removes_lexical_rows() {
+        let (_dir, db) = open_temp();
+        db.insert_chunk(&new_chunk("p1", SectionType::Method, 0, "quantization"))
+            .unwrap();
+        assert_eq!(db.lexical_search("quantization", 10).unwrap().len(), 1);
+        db.delete_chunks_for_paper("p1").unwrap();
+        assert!(db.lexical_search("quantization", 10).unwrap().is_empty());
     }
 
     #[test]
