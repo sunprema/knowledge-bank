@@ -177,11 +177,13 @@ enum Command {
     },
     /// MCP server on stdio (for Claude Code)
     Mcp,
-    /// HTTP server (v0.2)
+    /// HTTP server (loopback-only, X-KB-Key auth)
     Serve {
         #[arg(long, default_value_t = 4321)]
         port: u16,
     },
+    /// Generate a fresh HTTP API key, replacing the existing one
+    RotateKey,
 }
 
 #[derive(Subcommand)]
@@ -324,7 +326,8 @@ async fn run(cli: Cli) -> Result<(), KbError> {
         },
         Command::Watch { daemon } => commands::watch(kb, daemon).await,
         Command::Mcp => commands::mcp(kb).await,
-        Command::Serve { port } => commands::serve(&kb, port).await,
+        Command::Serve { port } => commands::serve(kb, port).await,
+        Command::RotateKey => commands::rotate_key(&kb),
     }
 }
 

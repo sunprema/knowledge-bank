@@ -950,9 +950,22 @@ pub async fn mcp(kb: Kb) -> Result<(), KbError> {
     crate::server::mcp::run(kb.paths, kb.config).await
 }
 
-pub async fn serve(kb: &Kb, port: u16) -> Result<(), KbError> {
-    let _ = (kb, port);
-    Err(planned("serve", "v0.2"))
+pub async fn serve(kb: Kb, port: u16) -> Result<(), KbError> {
+    crate::server::http::run(kb.paths, kb.config, port).await
+}
+
+pub fn rotate_key(kb: &Kb) -> Result<(), KbError> {
+    let key = crate::server::http::rotate_api_key(&kb.paths)?;
+    match kb.format {
+        OutputFormat::Json => {
+            println!("{}", serde_json::to_string_pretty(&json!({ "api_key": key })).unwrap());
+        }
+        OutputFormat::Pretty => {
+            println!("new API key: {key}");
+            println!("clients must now send  X-KB-Key: {key}");
+        }
+    }
+    Ok(())
 }
 
 pub fn excerpt(kb: &Kb, chunk_ids: Vec<String>, out: PathBuf) -> Result<(), KbError> {

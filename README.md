@@ -2,9 +2,9 @@
 
 A single Rust binary (the `kb` CLI) that turns a folder of arXiv papers into a
 queryable, AI-friendly knowledge base: save a paper in one command,
-search across your corpus semantically, and let Claude synthesize
-across papers via MCP — with every claim deep-linked back to the
-source PDF.
+search across your corpus semantically, let Claude synthesize across
+papers via MCP, and browse and analyze everything in a local web app —
+with every claim deep-linked back to the source PDF.
 
 ▶ **[Watch the 75-second cinematic demo](https://sunprema.github.io/knowledge-bank/)** —
 served by GitHub Pages from [`docs/`](./docs/index.html).
@@ -223,11 +223,43 @@ that nearly free — it only pays the API for text it has never seen.
 
 ```bash
 kb mcp               # MCP server on stdio (how Claude Code connects)
+kb serve             # HTTP API + browser web app on http://127.0.0.1:4321
+kb serve --port 8080 # … on a different port
+kb rotate-key        # generate a fresh HTTP API key
 kb watch             # foreground folder watcher (see below)
 ```
 
-Planned for v0.2: `kb similar` (papers near this one), `kb excerpt`
-(compile chosen sections into one PDF), `kb serve` (HTTP API).
+`kb serve` starts a loopback-only HTTP server for tools that don't speak
+MCP — browser extensions, curl scripts, alternative clients — and ships
+a self-contained **web app** at `/` for browsing and analyzing the
+corpus from your browser. It binds `127.0.0.1` only (never `0.0.0.0`)
+and requires an `X-KB-Key` header on every request; the key is generated
+on first run, stored mode-0600 in `.arxiv-kb/api_key`, and printed on
+startup (override with `KB_API_KEY`, rotate with `kb rotate-key`).
+
+| Method & path | Purpose |
+|---|---|
+| `GET /` | the web app (no key required for the shell) |
+| `GET /health` | liveness probe (no key required) |
+| `GET /stats` | corpus stats |
+| `GET /papers` | list documents (`?tag=`, `?category=`) |
+| `GET /papers/{id}` | metadata + notes + PDF path |
+| `POST /search` | semantic search (body: `query`, `mode`, `k`, filters) |
+| `POST /papers/{id}/notes` | append a note and re-embed |
+| `GET /chunks/{id}` | full chunk text + deep link |
+| `GET /open/{id}` | 302 redirect to the PDF deep link |
+
+The web app needs no build step. Open the `http://127.0.0.1:4321/?key=…`
+link printed by `kb serve` — it seeds the key into your browser
+(`localStorage`) — and you get three views: **Papers** (filter by
+text/tag/category/kind; open any document's abstract, notes, and PDF
+deep-link), **Search** (narrow/wide semantic search with per-chunk
+scores and deep-links, cross-linking into the paper detail), and
+**Analytics** (document/chunk counts, chunks-per-section breakdown, and
+a tag cloud).
+
+Planned for v0.2: `kb similar` (papers near this one) and `kb excerpt`
+(compile chosen sections into one PDF).
 
 ## Claude Code integration
 

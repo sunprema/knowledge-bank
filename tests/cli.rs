@@ -265,7 +265,7 @@ fn update_local_pdf_paper_exits_1_with_hint() {
 fn v02_commands_say_so() {
     let dir = tempfile::tempdir().unwrap();
     kb(dir.path())
-        .args(["serve"])
+        .args(["excerpt", "some-chunk-id", "--out", "/tmp/kb-excerpt-test.pdf"])
         .assert()
         .code(1)
         .stderr(predicate::str::contains("planned for v0.2"));

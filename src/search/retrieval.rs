@@ -324,9 +324,8 @@ pub async fn search(
     let mut total_chunks = 0usize;
 
     for (rec, score) in ranked_records {
-        // Notes have no PDF; deep-link to the idea body instead.
-        let pdf = paths.pdf_path(&rec.paper_id);
-        let target = if pdf.exists() { pdf } else { paths.idea_path(&rec.paper_id) };
+        // Notes and reflections have no PDF; deep-link to their body file.
+        let target = paths.link_target(&rec.paper_id, rec.section_type);
         let hit = ChunkHit {
             chunk_id: rec.chunk_id.clone(),
             section_type: rec.section_type.as_str().to_string(),

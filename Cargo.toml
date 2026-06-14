@@ -5,11 +5,13 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.102"
+axum = "0.8.7"
 chrono = { version = "0.4.45", features = ["serde"] }
 clap = { version = "4.6.1", features = ["derive"] }
 dirs = "6.0.0"
 dom_smoothie = "0.18.0"
 flate2 = "1.1.9"
+getrandom = "0.3.4"
 hex = "0.4.3"
 htmd = "0.5.4"
 indicatif = "0.18.4"
@@ -26,8 +28,9 @@ sha2 = "0.11.0"
 tar = "0.4.46"
 tempfile = "3.27.0"
 thiserror = "2.0.18"
-tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros", "process", "fs", "signal", "time", "io-std", "io-util"] }
+tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros", "process", "fs", "signal", "time", "io-std", "io-util", "net"] }
 toml = "1.1.2"
+tower-http = { version = "0.6.6", features = ["cors", "trace"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 turbovec = "0.9.0"

@@ -1,0 +1,564 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Knowledge Bank</title>
+<style>
+  :root{
+    --bg:#04070d; --panel:rgba(10,20,30,.7); --panel2:rgba(7,13,21,.82);
+    --line:rgba(127,233,255,.14); --line2:rgba(127,233,255,.08);
+    --accent:#7fe9ff; --accent-dim:#5f7b97;
+    --text:#dfe9f5; --muted:#8fa3ba; --faint:#5c708a;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{
+    background:var(--bg); color:var(--text);
+    font-family:-apple-system,"SF Pro Display","Segoe UI",Helvetica,Arial,sans-serif;
+    font-size:14px; line-height:1.5;
+    background-image:radial-gradient(1200px 600px at 70% -10%, rgba(127,233,255,.06), transparent 60%);
+  }
+  a{color:var(--accent);text-decoration:none}
+  a:hover{text-decoration:underline}
+  button{font:inherit;color:inherit;cursor:pointer}
+  header{
+    display:flex;align-items:center;gap:18px;
+    padding:14px 22px;border-bottom:1px solid var(--line);
+    background:var(--panel2);position:sticky;top:0;z-index:5;backdrop-filter:blur(8px);
+  }
+  .brand{font-weight:600;letter-spacing:.3px;font-size:16px;white-space:nowrap}
+  .brand .dot{color:var(--accent)}
+  nav{display:flex;gap:4px}
+  nav button{
+    background:transparent;border:1px solid transparent;border-radius:8px;
+    padding:7px 14px;color:var(--muted);
+  }
+  nav button.active{color:var(--bg);background:var(--accent);font-weight:600}
+  nav button:not(.active):hover{color:var(--text);border-color:var(--line)}
+  .spacer{flex:1}
+  .keybtn{
+    background:transparent;border:1px solid var(--line);border-radius:8px;
+    padding:6px 12px;color:var(--muted);font-size:13px;
+  }
+  .keybtn:hover{border-color:var(--accent);color:var(--text)}
+  .keybtn .ok{color:#79e0a9}
+  .keybtn .no{color:#ff9b9b}
+  main{padding:22px;max-width:1300px;margin:0 auto}
+
+  /* ---- papers ---- */
+  .filters{display:flex;flex-wrap:wrap;gap:10px;margin-bottom:18px;align-items:center}
+  .filters input[type=text], .filters select{
+    background:var(--panel);border:1px solid var(--line);border-radius:8px;
+    color:var(--text);padding:8px 11px;font:inherit;outline:none;
+  }
+  .filters input[type=text]{min-width:240px;flex:1;max-width:380px}
+  .filters input:focus, .filters select:focus{border-color:var(--accent)}
+  .filters .count{color:var(--faint);font-size:12.5px;margin-left:auto}
+
+  .layout{display:grid;grid-template-columns:minmax(320px,420px) 1fr;gap:18px;align-items:start}
+  @media(max-width:880px){.layout{grid-template-columns:1fr}}
+  .list{display:flex;flex-direction:column;gap:8px;max-height:calc(100vh - 200px);overflow:auto;padding-right:4px}
+  .card{
+    background:var(--panel);border:1px solid var(--line2);border-radius:10px;
+    padding:12px 14px;cursor:pointer;transition:border-color .12s,transform .12s;
+  }
+  .card:hover{border-color:var(--line)}
+  .card.sel{border-color:var(--accent);background:rgba(127,233,255,.06)}
+  .card .t{font-weight:600;color:var(--text);margin-bottom:3px}
+  .card .a{color:var(--muted);font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .card .meta{display:flex;gap:8px;flex-wrap:wrap;margin-top:7px;align-items:center}
+  .badge{
+    font-size:11px;padding:2px 8px;border-radius:20px;border:1px solid var(--line);
+    color:var(--accent-dim);
+  }
+  .badge.kind-note{color:#79e0a9;border-color:rgba(121,224,169,.3)}
+  .badge.kind-reflection{color:#cfe0f0;border-color:rgba(207,224,240,.3)}
+  .tag{font-size:11px;color:var(--faint);padding:2px 7px;border-radius:6px;background:var(--line2)}
+
+  .detail{
+    background:var(--panel);border:1px solid var(--line2);border-radius:12px;
+    padding:22px 24px;min-height:300px;
+  }
+  .detail .empty{color:var(--faint);text-align:center;padding:80px 0}
+  .detail h1{font-size:20px;margin:0 0 10px;line-height:1.35}
+  .detail .authors{color:var(--muted);margin-bottom:14px}
+  .detail .chips{display:flex;flex-wrap:wrap;gap:7px;margin-bottom:16px}
+  .detail .sec{margin-top:18px}
+  .detail .sec h3{font-size:12px;text-transform:uppercase;letter-spacing:.6px;color:var(--accent-dim);margin:0 0 7px}
+  .detail .abs{color:var(--text);opacity:.92}
+  .detail .notes{
+    background:var(--panel2);border:1px solid var(--line2);border-radius:8px;
+    padding:14px 16px;white-space:pre-wrap;word-break:break-word;color:#cfe0f0;font-size:13px;
+  }
+  .detail .kv{display:grid;grid-template-columns:120px 1fr;gap:6px 14px;color:var(--muted);font-size:13px}
+  .detail .kv b{color:var(--faint);font-weight:500}
+  .pdfbtn{
+    display:inline-block;margin-top:6px;background:linear-gradient(90deg,#2a7fa8,#7fe9ff);
+    color:#04070d;font-weight:600;border-radius:8px;padding:8px 16px;
+  }
+  .pdfbtn:hover{text-decoration:none;filter:brightness(1.08)}
+
+  /* ---- pdf side panel (drag the left edge to resize; width persists) ---- */
+  :root{--pdfw:62vw}
+  .pdfpanel{
+    position:fixed;top:0;right:0;height:100vh;width:var(--pdfw);
+    background:var(--panel2);border-left:1px solid var(--line);
+    transform:translateX(100%);transition:transform .2s ease;
+    z-index:15;display:flex;flex-direction:column;
+  }
+  .pdfpanel.open{transform:none;box-shadow:-20px 0 60px rgba(0,0,0,.5)}
+  body.pdfopen main{margin:0 var(--pdfw) 0 0;max-width:none}
+  /* reading mode: with the PDF open, the left side is a compact nav column —
+     just the list (papers view), and clicking a card loads its PDF. */
+  body.pdfopen .layout{grid-template-columns:1fr}
+  body.pdfopen .detail{display:none}
+  .list,.detail{min-width:0}
+  body.resizing{cursor:col-resize;user-select:none}
+  body.resizing .pdfpanel{transition:none}
+  body.resizing .pdfpanel iframe{pointer-events:none}  /* keep drag events off the PDF */
+  .pdfpanel .grip{position:absolute;left:-3px;top:0;width:7px;height:100%;cursor:col-resize;z-index:16}
+  .pdfpanel .grip:hover{background:linear-gradient(90deg,rgba(127,233,255,.35),transparent)}
+  .pdfpanel .bar{display:flex;align-items:center;gap:8px;padding:10px 12px 10px 16px;border-bottom:1px solid var(--line)}
+  .pdfpanel .bar .ttl{flex:1;font-size:13px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .pdfpanel .bar a{color:var(--muted);border:1px solid var(--line);border-radius:7px;padding:5px 10px;font-size:12.5px}
+  .pdfpanel .bar a:hover{color:var(--text);border-color:var(--accent);text-decoration:none}
+  .pdfpanel .bar .x{background:transparent;border:none;color:var(--muted);font-size:17px;padding:2px 8px;border-radius:7px}
+  .pdfpanel .bar .x:hover{color:var(--text);background:var(--line2)}
+  .pdfpanel iframe{flex:1;border:0;width:100%;background:#1a1f26}
+  @media(max-width:880px){
+    .pdfpanel{width:100vw}
+    body.pdfopen main{margin-right:0}
+    .pdfpanel .grip{display:none}
+  }
+
+  /* ---- analytics ---- */
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:14px;margin-bottom:24px}
+  .stat{background:var(--panel);border:1px solid var(--line2);border-radius:12px;padding:18px 20px}
+  .stat .n{font-size:30px;font-weight:600;color:var(--accent)}
+  .stat .l{color:var(--muted);font-size:12.5px;text-transform:uppercase;letter-spacing:.5px;margin-top:4px}
+  .panel{background:var(--panel);border:1px solid var(--line2);border-radius:12px;padding:20px 22px;margin-bottom:18px}
+  .panel h2{font-size:13px;text-transform:uppercase;letter-spacing:.6px;color:var(--accent-dim);margin:0 0 16px}
+  .bar{display:grid;grid-template-columns:130px 1fr 48px;align-items:center;gap:12px;margin-bottom:9px}
+  .bar .name{color:var(--muted);font-size:13px;text-align:right}
+  .bar .track{background:var(--line2);border-radius:6px;height:14px;overflow:hidden}
+  .bar .fill{height:100%;background:linear-gradient(90deg,#2a7fa8,#7fe9ff);border-radius:6px}
+  .bar .v{color:var(--faint);font-size:12.5px}
+  .cloud{display:flex;flex-wrap:wrap;gap:9px;align-items:baseline}
+  .cloud .ctag{color:var(--text);border:1px solid var(--line);border-radius:20px;padding:4px 12px}
+  .cloud .ctag b{color:var(--accent);margin-left:6px;font-weight:600}
+
+  /* ---- search ---- */
+  .searchbtn{background:var(--accent);color:#04070d;border:none;border-radius:8px;padding:8px 18px;font-weight:600}
+  .searchbtn:hover{filter:brightness(1.08)}
+  .rgroup{background:var(--panel);border:1px solid var(--line2);border-radius:12px;padding:16px 18px;margin-bottom:14px}
+  .rhead{display:flex;align-items:center;gap:10px;cursor:pointer;flex-wrap:wrap;text-decoration:none;color:inherit}
+  .rhead:hover .rtitle{color:var(--accent)}
+  .rtitle{font-weight:600;font-size:15px}
+  .rbest{margin-left:auto;color:var(--faint);font-size:12px;white-space:nowrap}
+  .rauthors{color:var(--muted);font-size:12.5px;margin:3px 0 12px}
+  .hit{display:block;border-top:1px solid var(--line2);padding:10px 8px;margin:0 -8px;border-radius:8px}
+  .hit:first-of-type{border-top:none}
+  a.hit{color:inherit;text-decoration:none;cursor:pointer}
+  a.hit:hover{background:rgba(127,233,255,.06)}
+  a.hit:hover .open{color:var(--accent)}
+  .hitmeta{display:flex;align-items:center;gap:10px;margin-bottom:4px;font-size:12px}
+  .score{color:var(--accent);font-weight:600}
+  .sect{color:var(--accent-dim);text-transform:uppercase;letter-spacing:.4px;font-size:11px}
+  .pg{color:var(--faint)}
+  .open{margin-left:auto;font-size:12px;color:var(--accent-dim)}
+  .snip{color:#cfe0f0;font-size:13px}
+
+  .msg{color:var(--faint);padding:40px 0;text-align:center}
+  .err{color:#ff9b9b}
+
+  /* ---- key modal ---- */
+  .modal{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;align-items:center;justify-content:center;z-index:20;backdrop-filter:blur(3px)}
+  .modal.show{display:flex}
+  .modal .box{background:var(--panel2);border:1px solid var(--line);border-radius:14px;padding:26px;width:min(460px,92vw)}
+  .modal h2{margin:0 0 6px;font-size:17px}
+  .modal p{color:var(--muted);margin:0 0 16px;font-size:13px}
+  .modal input{width:100%;background:var(--bg);border:1px solid var(--line);border-radius:8px;color:var(--text);padding:10px 12px;font:inherit;outline:none}
+  .modal input:focus{border-color:var(--accent)}
+  .modal .row{display:flex;gap:10px;justify-content:flex-end;margin-top:16px}
+  .modal .save{background:var(--accent);color:#04070d;border:none;border-radius:8px;padding:9px 18px;font-weight:600}
+  .modal .cancel{background:transparent;border:1px solid var(--line);border-radius:8px;padding:9px 18px;color:var(--muted)}
+  code{background:var(--line2);padding:1px 6px;border-radius:5px;color:var(--accent)}
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">Knowledge Bank<span class="dot">.</span></div>
+  <nav>
+    <button id="nav-papers" class="active" onclick="show('papers')">Papers</button>
+    <button id="nav-search" onclick="show('search')">Search</button>
+    <button id="nav-analytics" onclick="show('analytics')">Analytics</button>
+  </nav>
+  <div class="spacer"></div>
+  <button class="keybtn" onclick="openKey()">API key <span id="keystatus"></span></button>
+</header>
+
+<main>
+  <section id="view-papers">
+    <div class="filters">
+      <input type="text" id="q" placeholder="Filter by title or author…" oninput="renderList()">
+      <select id="f-kind" onchange="renderList()">
+        <option value="">all kinds</option>
+        <option value="paper">papers</option>
+        <option value="note">ideas</option>
+        <option value="reflection">reflections</option>
+      </select>
+      <select id="f-tag" onchange="renderList()"><option value="">all tags</option></select>
+      <select id="f-cat" onchange="renderList()"><option value="">all categories</option></select>
+      <span class="count" id="count"></span>
+    </div>
+    <div class="layout">
+      <div class="list" id="list"><div class="msg">Loading…</div></div>
+      <div class="detail" id="detail"><div class="empty">Select a document to view its details.</div></div>
+    </div>
+  </section>
+
+  <section id="view-search" style="display:none">
+    <div class="filters">
+      <input type="text" id="sq" placeholder="Search across papers, ideas and reflections…"
+             onkeydown="if(event.key==='Enter')doSearch()">
+      <select id="s-mode" title="narrow = direct lookups (score floor); wide = synthesis (no floor)">
+        <option value="narrow">narrow</option>
+        <option value="wide">wide</option>
+      </select>
+      <button class="searchbtn" onclick="doSearch()">Search</button>
+      <span class="count" id="scount"></span>
+    </div>
+    <div id="results"><div class="msg">Enter a query to search the knowledge bank semantically.</div></div>
+  </section>
+
+  <section id="view-analytics" style="display:none">
+    <div class="grid" id="stat-cards"></div>
+    <div class="panel"><h2>Chunks per section</h2><div id="sections"></div></div>
+    <div class="panel"><h2>Tags</h2><div class="cloud" id="cloud"></div></div>
+  </section>
+</main>
+
+<div class="pdfpanel" id="pdfpanel">
+  <div class="grip" id="pdfgrip" title="Drag to resize"></div>
+  <div class="bar">
+    <span class="ttl" id="pdftitle">PDF</span>
+    <a id="pdfnewtab" href="#" target="_blank" rel="noopener" title="Open in a full tab">new tab ↗</a>
+    <button class="x" onclick="closePdf()" title="Close (Esc)">✕</button>
+  </div>
+  <iframe id="pdfframe" title="PDF preview"></iframe>
+</div>
+
+<div class="modal" id="keymodal">
+  <div class="box">
+    <h2>API key</h2>
+    <p>The HTTP server requires a key. It's printed by <code>kb serve</code> and stored in <code>.arxiv-kb/api_key</code>. Saved locally in your browser.</p>
+    <input type="password" id="keyinput" placeholder="paste your X-KB-Key…" autocomplete="off">
+    <div class="row">
+      <button class="cancel" onclick="closeKey()">Cancel</button>
+      <button class="save" onclick="saveKey()">Save</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const KEY = 'kb_api_key';
+let papers = [];   // cached /papers
+let selected = null;
+
+const $ = id => document.getElementById(id);
+const esc = s => (s ?? '').toString().replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+function getKey(){ return localStorage.getItem(KEY) || ''; }
+// Same-origin URL to the served PDF. Browsers block file:// links from an
+// http page, so we stream the PDF through the server; the key rides in the
+// query string since a top-level navigation can't send the X-KB-Key header.
+function pdfUrl(id, page){
+  let u = '/pdf/' + encodeURIComponent(id) + '?key=' + encodeURIComponent(getKey());
+  if (page) u += '#page=' + page;
+  return u;
+}
+function titleFor(id){ const p = papers.find(x => x.arxiv_id===id); return p ? p.title : id; }
+
+// Load a PDF into the side panel at the given page. Re-points the existing
+// iframe so click-through between results is instant.
+function openPdf(id, page){
+  const url = pdfUrl(id, page);
+  $('pdfframe').src = url;
+  $('pdfnewtab').href = url;
+  $('pdftitle').textContent = titleFor(id) + (page ? ` · p.${page}` : '');
+  $('pdfpanel').classList.add('open');
+  document.body.classList.add('pdfopen');
+}
+function closePdf(){
+  $('pdfpanel').classList.remove('open');
+  document.body.classList.remove('pdfopen');
+  $('pdfframe').src = 'about:blank';
+}
+// Left-click → side panel; ⌘/Ctrl/middle-click → let the browser open a new
+// tab via the anchor's href.
+function pdfClick(ev, id, page){
+  if (ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.button===1) return true;
+  ev.preventDefault();
+  openPdf(id, page);
+  return false;
+}
+
+// Drag the panel's left edge to resize; width persists across sessions.
+const PDFW = 'kb_pdfw';
+function setPdfWidth(w){ document.documentElement.style.setProperty('--pdfw', w); }
+(function initResize(){
+  const saved = localStorage.getItem(PDFW);
+  if (saved) setPdfWidth(saved);
+  const clamp = px => Math.max(360, Math.min(px, window.innerWidth * 0.85));
+  let dragging = false;
+  $('pdfgrip').addEventListener('mousedown', e => {
+    dragging = true; document.body.classList.add('resizing'); e.preventDefault();
+  });
+  document.addEventListener('mousemove', e => {
+    if (!dragging) return;
+    setPdfWidth(clamp(window.innerWidth - e.clientX) + 'px');
+  });
+  document.addEventListener('mouseup', () => {
+    if (!dragging) return;
+    dragging = false; document.body.classList.remove('resizing');
+    localStorage.setItem(PDFW, getComputedStyle(document.documentElement).getPropertyValue('--pdfw').trim());
+  });
+})();
+function keyStatus(){
+  const el = $('keystatus');
+  el.innerHTML = getKey() ? '<span class="ok">●</span>' : '<span class="no">●</span>';
+}
+function openKey(){ $('keyinput').value = getKey(); $('keymodal').classList.add('show'); $('keyinput').focus(); }
+function closeKey(){ $('keymodal').classList.remove('show'); }
+function saveKey(){
+  localStorage.setItem(KEY, $('keyinput').value.trim());
+  closeKey(); keyStatus(); init();
+}
+
+async function api(path, opts={}){
+  const headers = Object.assign({ 'X-KB-Key': getKey() }, opts.headers||{});
+  const r = await fetch(path, Object.assign({}, opts, { headers }));
+  if (r.status === 401){ openKey(); throw new Error('unauthorized — set your API key'); }
+  if (!r.ok){ throw new Error((await r.json().catch(()=>({error:r.statusText}))).error || r.statusText); }
+  return r.json();
+}
+
+const VIEWS = ['papers','search','analytics'];
+function show(v){
+  if (!VIEWS.includes(v)) v='papers';
+  VIEWS.forEach(name => {
+    $('view-'+name).style.display = name===v ? '' : 'none';
+    $('nav-'+name).classList.toggle('active', name===v);
+  });
+  if (location.hash.slice(1) !== v) history.replaceState(null,'','#'+v);
+  if (v==='analytics') loadAnalytics();
+  if (v==='search') $('sq').focus();
+}
+
+/* ---------- papers ---------- */
+async function loadPapers(){
+  try{
+    papers = await api('/papers');
+    buildFilterOptions();
+    renderList();
+  }catch(e){
+    $('list').innerHTML = `<div class="msg err">${esc(e.message)}</div>`;
+  }
+}
+
+function buildFilterOptions(){
+  const tags = new Set(), cats = new Set();
+  papers.forEach(p => { (p.tags||[]).forEach(t=>tags.add(t)); (p.categories||[]).forEach(c=>cats.add(c)); });
+  fillSelect('f-tag', [...tags].sort(), 'all tags');
+  fillSelect('f-cat', [...cats].sort(), 'all categories');
+}
+function fillSelect(id, items, allLabel){
+  const sel = $(id), cur = sel.value;
+  sel.innerHTML = `<option value="">${allLabel}</option>` + items.map(i=>`<option>${esc(i)}</option>`).join('');
+  sel.value = cur;
+}
+
+function renderList(){
+  const q = $('q').value.toLowerCase().trim();
+  const kind = $('f-kind').value, tag = $('f-tag').value, cat = $('f-cat').value;
+  const rows = papers.filter(p => {
+    if (kind && (p.kind||'paper') !== kind) return false;
+    if (tag && !(p.tags||[]).includes(tag)) return false;
+    if (cat && !(p.categories||[]).includes(cat)) return false;
+    if (q){
+      const hay = (p.title+' '+(p.authors||[]).join(' ')).toLowerCase();
+      if (!hay.includes(q)) return false;
+    }
+    return true;
+  });
+  $('count').textContent = `${rows.length} of ${papers.length}`;
+  if (!rows.length){ $('list').innerHTML = `<div class="msg">No documents match.</div>`; return; }
+  $('list').innerHTML = rows.map(p => {
+    const kindName = p.kind==='note' ? 'idea' : (p.kind||'paper');
+    const tags = (p.tags||[]).slice(0,4).map(t=>`<span class="tag">${esc(t)}</span>`).join('');
+    return `<div class="card ${selected===p.arxiv_id?'sel':''}" onclick="openPaper('${esc(p.arxiv_id)}')">
+      <div class="t">${esc(p.title)}</div>
+      <div class="a">${esc((p.authors||[]).join(', ')) || '—'}</div>
+      <div class="meta">
+        <span class="badge kind-${esc(p.kind||'paper')}">${esc(kindName)}</span>
+        ${p.published_at?`<span class="tag">${esc((p.published_at||'').slice(0,10))}</span>`:''}
+        ${tags}
+      </div>
+    </div>`;
+  }).join('');
+}
+
+async function openPaper(id){
+  selected = id; renderList();
+  // Reading mode (PDF panel open): a card click swaps the PDF straight away.
+  if (document.body.classList.contains('pdfopen')){
+    const p = papers.find(x => x.arxiv_id===id);
+    if (p && (p.source_format==='pdf' || p.source_format==='latex')) openPdf(id);
+  }
+  $('detail').innerHTML = `<div class="msg">Loading…</div>`;
+  try{
+    const d = await api('/papers/' + encodeURIComponent(id));
+    renderDetail(d);
+  }catch(e){
+    $('detail').innerHTML = `<div class="msg err">${esc(e.message)}</div>`;
+  }
+}
+
+function renderDetail(d){
+  const m = d.metadata, notes = (d.notes||'').trim();
+  const hasPdf = m.source_format==='pdf' || m.source_format==='latex';
+  const chips = (m.tags||[]).map(t=>`<span class="tag">${esc(t)}</span>`).join('')
+    + (m.categories||[]).map(c=>`<span class="badge">${esc(c)}</span>`).join('');
+  const kindName = m.kind==='note' ? 'idea' : (m.kind||'paper');
+  $('detail').innerHTML = `
+    <h1>${esc(m.title)}</h1>
+    <div class="authors">${esc((m.authors||[]).join(', ')) || '—'}</div>
+    <div class="chips">
+      <span class="badge kind-${esc(m.kind||'paper')}">${esc(kindName)}</span>
+      ${m.project?`<span class="badge">project: ${esc(m.project)}</span>`:''}
+      ${chips}
+    </div>
+    ${hasPdf ? `<a class="pdfbtn" href="${esc(pdfUrl(m.arxiv_id))}" onclick="return pdfClick(event,'${esc(m.arxiv_id)}')">Open PDF</a>`:''}
+    ${m.source_url?`<div class="sec"><a href="${esc(m.source_url)}" target="_blank" rel="noopener">${esc(m.source_url)} ↗</a></div>`:''}
+    ${m.abstract?`<div class="sec"><h3>Abstract</h3><div class="abs">${esc(m.abstract)}</div></div>`:''}
+    ${notes?`<div class="sec"><h3>Notes</h3><div class="notes">${esc(notes)}</div></div>`:''}
+    <div class="sec"><h3>Details</h3><div class="kv">
+      <b>id</b><span>${esc(m.arxiv_id)}</span>
+      <b>published</b><span>${esc((m.published_at||'—').slice(0,10))}</span>
+      <b>ingested</b><span>${esc((m.ingested_at||'—').slice(0,10))}</span>
+      <b>source</b><span>${esc(m.source_format||'—')}</span>
+      ${(m.links&&m.links.length)?`<b>links</b><span>${esc(m.links.join(', '))}</span>`:''}
+    </div></div>`;
+}
+
+/* ---------- search ---------- */
+async function doSearch(){
+  const q = $('sq').value.trim();
+  if (!q) return;
+  const mode = $('s-mode').value;
+  $('scount').textContent = '';
+  $('results').innerHTML = `<div class="msg">Searching…</div>`;
+  try{
+    const res = await api('/search', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query: q, mode }),
+    });
+    renderResults(res);
+  }catch(e){
+    $('results').innerHTML = `<div class="msg err">${esc(e.message)}</div>`;
+  }
+}
+
+function renderResults(res){
+  const groups = res.papers || [];
+  $('scount').textContent = `${res.total_chunks} chunks · ${groups.length} documents · ${esc(res.mode)} mode`;
+  if (!groups.length){
+    $('results').innerHTML = `<div class="msg">No results for “${esc(res.query)}”.${res.mode==='narrow'?' Try wide mode.':''}</div>`;
+    return;
+  }
+  $('results').innerHTML = groups.map(g => {
+    const p = g.paper, kindName = p.kind==='note' ? 'idea' : (p.kind||'paper');
+    // A whole hit row opens the PDF panel at that chunk's page; the header
+    // opens at the top hit's page. Pageless hits (notes/reflections, no PDF)
+    // stay non-clickable. Anchors keep href so ⌘/middle-click opens a tab.
+    const hits = (g.chunks||[]).map(c => {
+      const inner =
+        `<div class="hitmeta">
+          <span class="score">${(c.score||0).toFixed(3)}</span>
+          <span class="sect">${esc(c.section_type)}</span>
+          ${c.page?`<span class="pg">p.${esc(c.page)}</span>`:''}
+          ${c.page?`<span class="open">open ↗</span>`:''}
+        </div>
+        <div class="snip">${esc(c.snippet)}</div>`;
+      return c.page
+        ? `<a class="hit" href="${esc(pdfUrl(g.paper_id, c.page))}" onclick="return pdfClick(event,'${esc(g.paper_id)}',${c.page})">${inner}</a>`
+        : `<div class="hit">${inner}</div>`;
+    }).join('');
+    const firstPage = (g.chunks||[]).map(c=>c.page).find(Boolean);
+    const head = firstPage
+      ? `<a class="rhead" href="${esc(pdfUrl(g.paper_id, firstPage))}" onclick="return pdfClick(event,'${esc(g.paper_id)}',${firstPage})">`
+      : `<div class="rhead" onclick="show('papers');openPaper('${esc(g.paper_id)}')">`;
+    const headEnd = firstPage ? '</a>' : '</div>';
+    return `<div class="rgroup">
+      ${head}
+        <span class="badge kind-${esc(p.kind||'paper')}">${esc(kindName)}</span>
+        <span class="rtitle">${esc(p.title)}</span>
+        <span class="rbest">best ${(g.best_score||0).toFixed(3)}</span>
+      ${headEnd}
+      <div class="rauthors">${esc((p.authors||[]).join(', ')) || '—'}</div>
+      ${hits}
+    </div>`;
+  }).join('');
+}
+
+/* ---------- analytics ---------- */
+async function loadAnalytics(){
+  try{
+    const s = await api('/stats');
+    const db = s.db || {};
+    $('stat-cards').innerHTML = [
+      ['Documents', s.papers ?? 0],
+      ['Chunks', db.chunks ?? 0],
+      ['Cached embeddings', db.cache_entries ?? 0],
+      ['“Other” ratio', Math.round((db.other_ratio||0)*100)+'%'],
+    ].map(([l,n])=>`<div class="stat"><div class="n">${esc(n)}</div><div class="l">${esc(l)}</div></div>`).join('');
+
+    const secs = (db.chunks_per_section||[]).slice().sort((a,b)=>b[1]-a[1]);
+    const max = secs.reduce((m,[,n])=>Math.max(m,n),0) || 1;
+    $('sections').innerHTML = secs.length ? secs.map(([name,n])=>`
+      <div class="bar"><div class="name">${esc(name)}</div>
+        <div class="track"><div class="fill" style="width:${(n/max*100).toFixed(1)}%"></div></div>
+        <div class="v">${esc(n)}</div></div>`).join('')
+      : `<div class="msg">No chunks yet.</div>`;
+
+    const tags = Object.entries(s.tags||{}).sort((a,b)=>b[1]-a[1]);
+    const tmax = tags.reduce((m,[,n])=>Math.max(m,n),0) || 1;
+    $('cloud').innerHTML = tags.length ? tags.map(([t,n])=>{
+      const size = 13 + Math.round((n/tmax)*9);
+      return `<span class="ctag" style="font-size:${size}px">${esc(t)}<b>${esc(n)}</b></span>`;
+    }).join('') : `<div class="msg">No tags yet.</div>`;
+  }catch(e){
+    $('stat-cards').innerHTML = `<div class="msg err">${esc(e.message)}</div>`;
+  }
+}
+
+/* ---------- boot ---------- */
+function init(){ keyStatus(); loadPapers(); }
+$('keyinput').addEventListener('keydown', e=>{ if(e.key==='Enter') saveKey(); });
+document.addEventListener('keydown', e=>{ if(e.key==='Escape') closePdf(); });
+
+// One-click entry: ?key=… seeds the stored key, then is scrubbed from the URL
+// so it doesn't linger in history (the `kb serve` banner prints such a link).
+const urlKey = new URLSearchParams(location.search).get('key');
+if (urlKey){
+  localStorage.setItem(KEY, urlKey.trim());
+  history.replaceState(null, '', location.pathname + location.hash);
+}
+if (!getKey()) openKey();
+show(location.hash.slice(1) || 'papers');
+init();
+</script>
+</body>
+</html>

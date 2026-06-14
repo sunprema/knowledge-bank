@@ -3,7 +3,7 @@
 //! Resolution order for the KB root: `--root` flag > `KB_ROOT` env >
 //! `~/arxiv-kb`. Env vars override config values (PRD §10).
 
-use crate::{KbError, SCHEMA_VERSION};
+use crate::{KbError, SCHEMA_VERSION, SectionType};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -341,6 +341,20 @@ impl KbPaths {
     /// Canonical body of a cross-paper reflection (`kind = reflection`).
     pub fn reflection_path(&self, id: &str) -> PathBuf {
         self.paper_dir(id).join("reflection.md")
+    }
+
+    /// Deep-link target for a chunk: the PDF for ingested papers, else the
+    /// note/reflection body. Reflections live in `reflection.md`, notes in
+    /// `idea.md`, so the body path is chosen by section type.
+    pub fn link_target(&self, id: &str, section: SectionType) -> PathBuf {
+        let pdf = self.pdf_path(id);
+        if pdf.exists() {
+            pdf
+        } else if section == SectionType::Reflection {
+            self.reflection_path(id)
+        } else {
+            self.idea_path(id)
+        }
     }
 
     /// Paper folders = direct children of root containing a metadata.json
