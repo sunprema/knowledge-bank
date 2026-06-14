@@ -129,8 +129,14 @@ enum Command {
     },
     /// Paper details: metadata + notes + sections summary
     Show { arxiv_id: String },
-    /// Papers semantically near this one (v0.2)
-    Similar { arxiv_id: String },
+    /// Documents semantically nearest this one (CLI twin of the web app's
+    /// "Related" panel)
+    Similar {
+        arxiv_id: String,
+        /// Number of results
+        #[arg(short = 'k', long = "limit", default_value_t = 10)]
+        limit: usize,
+    },
     /// Open the PDF in the default viewer, optionally at a section/chunk
     Open {
         /// arXiv id or chunk id (e.g. 2504.19874 or 2504.19874_method_0)
@@ -312,7 +318,7 @@ async fn run(cli: Cli) -> Result<(), KbError> {
             commands::list(&kb, tag, kind.to_filter(), project)
         }
         Command::Show { arxiv_id } => commands::show(&kb, arxiv_id),
-        Command::Similar { arxiv_id } => commands::similar(&kb, arxiv_id).await,
+        Command::Similar { arxiv_id, limit } => commands::similar(&kb, arxiv_id, limit).await,
         Command::Open { target, section } => commands::open_target(&kb, target, section),
         Command::Excerpt { chunk_ids, out } => commands::excerpt(&kb, chunk_ids, out),
         Command::Stats => commands::stats(&kb),

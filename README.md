@@ -198,11 +198,17 @@ reindexes) and power `--tag` filters.
 ```bash
 kb list                      # all documents (--tag/--kind/--project to filter)
 kb show 2504.19874           # metadata, abstract, indexed sections, your notes
+kb similar 2504.19874        # documents nearest this one (-k/--limit N)
 kb open 2504.19874           # PDF in your default viewer
 kb open 2504.19874 --section method     # … at that section's page
 kb open 2504.19874_method_0  # … at a specific search hit's page
 kb stats                     # corpus totals, chunks per section type, top tags
 ```
+
+`kb similar` ranks the documents whose content sits closest to a given one in
+embedding space (the same signal behind the web app's **Related** panel and the
+graph's similarity edges). It reuses the embedding cache, so it costs no API
+calls unless the cache was cleared.
 
 ### Health and maintenance
 
@@ -280,8 +286,7 @@ size are configurable under `[chat]` in `config.toml` (default
 `gpt-4o-mini`, 12 context chunks). **Related** and **Graph** similarity reuse
 the embedding cache, so they cost no API calls.
 
-Planned for v0.2: `kb similar` (the CLI twin of the web app's Related panel)
-and `kb excerpt` (compile chosen sections into one PDF).
+Planned for v0.2: `kb excerpt` (compile chosen sections into one PDF).
 
 ## Claude Code integration
 

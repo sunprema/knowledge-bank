@@ -663,9 +663,46 @@ pub fn show(kb: &Kb, arxiv_id: String) -> Result<(), KbError> {
     Ok(())
 }
 
-pub async fn similar(kb: &Kb, arxiv_id: String) -> Result<(), KbError> {
-    let _ = (kb, arxiv_id);
-    Err(planned("similar", "v0.2"))
+/// Documents most similar to `arxiv_id` — the CLI twin of the web app's
+/// "Related" panel. Uses the paper's cached centroid (no API calls unless the
+/// embedding cache was cleared, in which case it re-embeds title+abstract).
+pub async fn similar(kb: &Kb, arxiv_id: String, limit: usize) -> Result<(), KbError> {
+    let id = canonical_id(&arxiv_id)?;
+    require_paper(kb, &id)?; // friendly NotFound before we touch the stores
+    let resp = retrieval::similar_papers(&kb.paths, &kb.config, &id, limit.max(1)).await?;
+
+    match kb.format {
+        OutputFormat::Json => {
+            println!("{}", serde_json::to_string_pretty(&resp).unwrap());
+        }
+        OutputFormat::Pretty => {
+            if resp.papers.is_empty() {
+                println!("no documents similar to {id}");
+                println!("(is the corpus indexed? check `kb status`, then `kb reindex`)");
+                return Ok(());
+            }
+            println!("documents similar to {id}:");
+            for (i, p) in resp.papers.iter().enumerate() {
+                let marker = match p.kind.as_str() {
+                    "note" => "  (idea)",
+                    "reflection" => "  (reflection)",
+                    _ => "",
+                };
+                println!(
+                    "{:>2}. [{:.3}] {}  ({}){}",
+                    i + 1,
+                    p.score,
+                    p.title,
+                    p.paper_id,
+                    marker
+                );
+                if !p.tags.is_empty() {
+                    println!("      tags: {}", p.tags.join(", "));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 pub fn open_target(kb: &Kb, target: String, section: Option<String>) -> Result<(), KbError> {
