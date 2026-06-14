@@ -172,6 +172,57 @@
   .msg{color:var(--faint);padding:40px 0;text-align:center}
   .err{color:#ff9b9b}
 
+  /* ---- related / similar (in paper detail) ---- */
+  .rel{display:flex;flex-direction:column;gap:6px}
+  .relitem{display:flex;align-items:center;gap:9px;background:var(--panel2);border:1px solid var(--line2);
+    border-radius:8px;padding:8px 11px;cursor:pointer}
+  .relitem:hover{border-color:var(--line)}
+  .reltitle{flex:1;color:var(--text);font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .relscore{color:var(--accent);font-size:12px;font-weight:600}
+
+  /* ---- graph ---- */
+  .gctl{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:13px}
+  .gctl select,.gctl input[type=text]{background:var(--panel);border:1px solid var(--line);border-radius:8px;
+    color:var(--text);padding:7px 10px;font:inherit;outline:none}
+  .gctl input[type=checkbox]{accent-color:var(--accent)}
+  .glegend{display:flex;gap:14px;align-items:center;color:var(--faint);font-size:12px;margin-left:8px}
+  .glegend i{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:5px;vertical-align:-1px}
+  .graphwrap{position:relative;background:var(--panel);border:1px solid var(--line2);border-radius:12px;
+    height:calc(100vh - 210px);overflow:hidden}
+  #graph{width:100%;height:100%;display:block;cursor:grab}
+  #graph.panning{cursor:grabbing}
+  .gedge{stroke:var(--accent-dim);stroke-opacity:.28}
+  .gedge.ge-similar{stroke-dasharray:3 3;stroke-opacity:.18}
+  .gedge.hot{stroke:var(--accent);stroke-opacity:.9}
+  .gnode{cursor:pointer}
+  .gnode .glabel{fill:var(--muted);font-size:10px;pointer-events:none}
+  .gnode.match circle{stroke:var(--accent);stroke-width:2.5px}
+  .gnode.match .glabel{fill:var(--text)}
+  .ginfo{position:absolute;left:14px;bottom:14px;max-width:60%;background:var(--panel2);
+    border:1px solid var(--line);border-radius:9px;padding:10px 13px;font-size:13px;display:none;pointer-events:none}
+  .ginfo .gsub{color:var(--faint);font-size:12px}
+
+  /* ---- chat ---- */
+  .chatwrap{display:flex;flex-direction:column;height:calc(100vh - 150px)}
+  .chatlog{flex:1;overflow:auto;display:flex;flex-direction:column;gap:14px;padding:6px 2px 18px}
+  .cbubble{max-width:760px;border-radius:12px;padding:13px 16px;border:1px solid var(--line2)}
+  .cbubble.user{align-self:flex-end;background:rgba(127,233,255,.08);border-color:var(--line)}
+  .cbubble.assistant{align-self:flex-start;background:var(--panel)}
+  .cbubble.pending .ctext{color:var(--faint)}
+  .ctext{white-space:pre-wrap;word-break:break-word;color:var(--text)}
+  .cite{color:var(--accent);font-weight:600;text-decoration:none}
+  .cite:hover{text-decoration:underline}
+  .csources{display:flex;flex-direction:column;gap:5px;margin-top:12px;padding-top:11px;border-top:1px solid var(--line2)}
+  .csrc{display:flex;align-items:baseline;gap:7px;color:var(--muted);font-size:12.5px;text-decoration:none;
+    padding:4px 7px;border-radius:7px}
+  .csrc:hover{background:rgba(127,233,255,.06);color:var(--text)}
+  .csrc b{color:var(--accent)}
+  .csrc .csect{color:var(--faint);font-size:11.5px}
+  .chatbar{display:flex;gap:10px;padding-top:12px;border-top:1px solid var(--line)}
+  .chatbar input{flex:1;background:var(--panel);border:1px solid var(--line);border-radius:8px;
+    color:var(--text);padding:10px 13px;font:inherit;outline:none}
+  .chatbar input:focus{border-color:var(--accent)}
+
   /* ---- key modal ---- */
   .modal{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;align-items:center;justify-content:center;z-index:20;backdrop-filter:blur(3px)}
   .modal.show{display:flex}
@@ -192,6 +243,8 @@
   <nav>
     <button id="nav-papers" class="active" onclick="show('papers')">Papers</button>
     <button id="nav-search" onclick="show('search')">Search</button>
+    <button id="nav-chat" onclick="show('chat')">Chat</button>
+    <button id="nav-graph" onclick="show('graph')">Graph</button>
     <button id="nav-analytics" onclick="show('analytics')">Analytics</button>
   </nav>
   <div class="spacer"></div>
@@ -230,6 +283,46 @@
       <span class="count" id="scount"></span>
     </div>
     <div id="results"><div class="msg">Enter a query to search the knowledge bank semantically.</div></div>
+  </section>
+
+  <section id="view-chat" style="display:none">
+    <div class="chatwrap">
+      <div class="chatlog" id="chatlog">
+        <div class="msg">Ask a question and get an answer synthesized from your corpus, with every
+          claim cited back to the source document and PDF page.</div>
+      </div>
+      <div class="chatbar">
+        <input type="text" id="cq" placeholder="Ask your knowledge base a question…"
+               onkeydown="if(event.key==='Enter')doChat()">
+        <button class="searchbtn" onclick="doChat()">Send</button>
+        <button class="keybtn" onclick="resetChat()">Clear</button>
+      </div>
+    </div>
+  </section>
+
+  <section id="view-graph" style="display:none">
+    <div class="filters">
+      <label class="gctl">neighbors
+        <select id="g-neighbors" onchange="loadGraph()" title="nearest-neighbor edges per node">
+          <option value="0">0</option>
+          <option value="3" selected>3</option>
+          <option value="5">5</option>
+        </select>
+      </label>
+      <label class="gctl"><input type="checkbox" id="g-links" checked onchange="drawGraph()"> links</label>
+      <label class="gctl"><input type="checkbox" id="g-similar" checked onchange="drawGraph()"> similar</label>
+      <input type="text" id="g-search" class="gctl" placeholder="highlight…" oninput="drawGraph()">
+      <span class="glegend">
+        <span><i style="background:#7fe9ff"></i>paper</span>
+        <span><i style="background:#79e0a9"></i>idea</span>
+        <span><i style="background:#cfe0f0"></i>reflection</span>
+      </span>
+      <span class="count" id="gcount"></span>
+    </div>
+    <div class="graphwrap">
+      <svg id="graph"></svg>
+      <div class="ginfo" id="ginfo"></div>
+    </div>
   </section>
 
   <section id="view-analytics" style="display:none">
@@ -344,7 +437,7 @@ async function api(path, opts={}){
   return r.json();
 }
 
-const VIEWS = ['papers','search','analytics'];
+const VIEWS = ['papers','search','chat','graph','analytics'];
 function show(v){
   if (!VIEWS.includes(v)) v='papers';
   VIEWS.forEach(name => {
@@ -354,6 +447,8 @@ function show(v){
   if (location.hash.slice(1) !== v) history.replaceState(null,'','#'+v);
   if (v==='analytics') loadAnalytics();
   if (v==='search') $('sq').focus();
+  if (v==='chat') $('cq').focus();
+  if (v==='graph'){ setupGraph(); if (!gData) loadGraph(); }
 }
 
 /* ---------- papers ---------- */
@@ -449,7 +544,30 @@ function renderDetail(d){
       <b>ingested</b><span>${esc((m.ingested_at||'—').slice(0,10))}</span>
       <b>source</b><span>${esc(m.source_format||'—')}</span>
       ${(m.links&&m.links.length)?`<b>links</b><span>${esc(m.links.join(', '))}</span>`:''}
-    </div></div>`;
+    </div></div>
+    <div class="sec"><h3>Related</h3><div class="rel" id="rellist"><div class="msg">Finding related documents…</div></div></div>`;
+  loadSimilar(m.arxiv_id);
+}
+
+/* ---------- related / similar ---------- */
+async function loadSimilar(id){
+  try{
+    const r = await api('/papers/' + encodeURIComponent(id) + '/similar?limit=6');
+    const list = $('rellist');
+    if (!list || selected !== id) return;  // user navigated away
+    if (!r.papers.length){ list.innerHTML = `<div class="msg">No related documents found.</div>`; return; }
+    list.innerHTML = r.papers.map(p => {
+      const kindName = p.kind==='note' ? 'idea' : (p.kind||'paper');
+      return `<div class="relitem" onclick="openPaper('${esc(p.paper_id)}')">
+        <span class="badge kind-${esc(p.kind||'paper')}">${esc(kindName)}</span>
+        <span class="reltitle">${esc(p.title)}</span>
+        <span class="relscore">${(p.score||0).toFixed(2)}</span>
+      </div>`;
+    }).join('');
+  }catch(e){
+    const list = $('rellist');
+    if (list) list.innerHTML = `<div class="msg err">${esc(e.message)}</div>`;
+  }
 }
 
 /* ---------- search ---------- */
@@ -542,6 +660,259 @@ async function loadAnalytics(){
   }catch(e){
     $('stat-cards').innerHTML = `<div class="msg err">${esc(e.message)}</div>`;
   }
+}
+
+/* ---------- chat ---------- */
+let chatHistory = [];   // [{role, content}] sent back for follow-ups
+
+function renderAnswer(text, sources){
+  // Turn [n] citation markers into clickable links into the matching source.
+  return esc(text).replace(/\[(\d+)\]/g, (m, d) => {
+    const s = (sources||[]).find(x => x.n === +d);
+    if (!s) return m;
+    return `<a class="cite" href="#" data-pid="${esc(s.paper_id)}" data-pg="${s.page||''}" data-pdf="${s.has_pdf?1:0}">[${d}]</a>`;
+  });
+}
+function chatBubble(role, text, sources){
+  const body = role==='assistant' ? renderAnswer(text, sources) : esc(text);
+  let src = '';
+  if (sources && sources.length){
+    src = `<div class="csources">` + sources.map(s =>
+      `<a class="csrc" href="#" data-pid="${esc(s.paper_id)}" data-pg="${s.page||''}" data-pdf="${s.has_pdf?1:0}" title="${esc(s.snippet)}">
+        <b>[${s.n}]</b><span class="reltitle">${esc(s.title)}</span>
+        <span class="csect">${esc(s.section_type)}${s.page?(' · p.'+s.page):''}</span></a>`).join('') + `</div>`;
+  }
+  return `<div class="cbubble ${role}"><div class="ctext">${body}</div>${src}</div>`;
+}
+function appendChat(role, text, pending){
+  const log = $('chatlog');
+  const empty = log.querySelector('.msg'); if (empty) log.innerHTML = '';
+  const div = document.createElement('div');
+  div.className = 'cbubble ' + role + (pending ? ' pending' : '');
+  div.innerHTML = `<div class="ctext">${esc(text)}</div>`;
+  log.appendChild(div);
+  log.scrollTop = log.scrollHeight;
+  return div;
+}
+// Citations and source chips open the PDF panel (or the paper, if no PDF).
+function bindChatSources(){
+  document.querySelectorAll('.cite, .csrc').forEach(el => {
+    if (el._bound) return; el._bound = true;
+    el.addEventListener('click', ev => {
+      ev.preventDefault();
+      const pid = el.dataset.pid, pg = el.dataset.pg;
+      if (el.dataset.pdf === '1') openPdf(pid, pg ? +pg : undefined);
+      else { show('papers'); openPaper(pid); }
+    });
+  });
+}
+async function doChat(){
+  const q = $('cq').value.trim();
+  if (!q) return;
+  $('cq').value = '';
+  appendChat('user', q);
+  const pending = appendChat('assistant', 'Thinking…', true);
+  try{
+    const res = await api('/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query: q, history: chatHistory }),
+    });
+    chatHistory.push({ role:'user', content:q }, { role:'assistant', content:res.answer });
+    if (chatHistory.length > 12) chatHistory = chatHistory.slice(-12);
+    pending.outerHTML = chatBubble('assistant', res.answer, res.sources);
+    bindChatSources();
+  }catch(e){
+    pending.outerHTML = `<div class="cbubble assistant"><div class="ctext err">${esc(e.message)}</div></div>`;
+  }
+  $('chatlog').scrollTop = $('chatlog').scrollHeight;
+}
+function resetChat(){
+  chatHistory = [];
+  $('chatlog').innerHTML = `<div class="msg">Conversation cleared. Ask a new question.</div>`;
+}
+
+/* ---------- graph (vanilla force-directed SVG) ---------- */
+let gData = null;       // {nodes, edges} from /graph
+let gSim = null;        // live simulation state
+let gRAF = null;
+let gTransform = { x:0, y:0, k:1 };
+let gWired = false;
+const KIND_COLOR = { paper:'#7fe9ff', note:'#79e0a9', reflection:'#cfe0f0' };
+
+function svgSize(){ const r = $('graph').getBoundingClientRect(); return { w:r.width||900, h:r.height||600 }; }
+function applyTransform(){
+  const g = $('graph').querySelector('#groot');
+  if (g) g.setAttribute('transform', `translate(${gTransform.x},${gTransform.y}) scale(${gTransform.k})`);
+}
+function toGraph(ev){
+  const r = $('graph').getBoundingClientRect();
+  return { x:(ev.clientX-r.left-gTransform.x)/gTransform.k, y:(ev.clientY-r.top-gTransform.y)/gTransform.k };
+}
+
+// Pan (drag background) + zoom (wheel). Wired once.
+function setupGraph(){
+  if (gWired) return; gWired = true;
+  const svg = $('graph');
+  let panning = false, sx=0, sy=0, ox=0, oy=0;
+  svg.addEventListener('mousedown', e => {
+    if (e.target.closest('.gnode')) return;   // node drag handles itself
+    panning = true; sx=e.clientX; sy=e.clientY; ox=gTransform.x; oy=gTransform.y;
+    svg.classList.add('panning');
+  });
+  document.addEventListener('mousemove', e => {
+    if (!panning) return;
+    gTransform.x = ox + (e.clientX-sx); gTransform.y = oy + (e.clientY-sy); applyTransform();
+  });
+  document.addEventListener('mouseup', () => { panning=false; svg.classList.remove('panning'); });
+  svg.addEventListener('wheel', e => {
+    e.preventDefault();
+    const r = svg.getBoundingClientRect(), mx=e.clientX-r.left, my=e.clientY-r.top;
+    const f = e.deltaY < 0 ? 1.1 : 1/1.1, k = Math.max(0.2, Math.min(4, gTransform.k*f));
+    gTransform.x = mx - (mx-gTransform.x)*(k/gTransform.k);
+    gTransform.y = my - (my-gTransform.y)*(k/gTransform.k);
+    gTransform.k = k; applyTransform();
+  }, { passive:false });
+}
+
+async function loadGraph(){
+  const n = $('g-neighbors').value;
+  $('gcount').textContent = 'Loading…';
+  try{
+    gData = await api('/graph?neighbors=' + encodeURIComponent(n));
+    gTransform = { x:0, y:0, k:1 };
+    initSim();
+    $('gcount').textContent = `${gData.nodes.length} nodes · ${gData.edges.length} edges`;
+  }catch(e){
+    gData = null;
+    $('gcount').textContent = '';
+    $('ginfo').style.display = 'block';
+    $('ginfo').innerHTML = `<span class="err">${esc(e.message)}</span>`;
+  }
+}
+
+function initSim(){
+  cancelAnimationFrame(gRAF); gRAF = null;
+  const { w, h } = svgSize();
+  const deg = {};
+  gData.edges.forEach(e => { deg[e.source]=(deg[e.source]||0)+1; deg[e.target]=(deg[e.target]||0)+1; });
+  const R = Math.min(w,h) * 0.35;
+  const nodes = gData.nodes.map((d,i) => {
+    const a = (i / Math.max(1,gData.nodes.length)) * Math.PI * 2;
+    return { ...d, deg:deg[d.id]||0,
+      x: w/2 + Math.cos(a)*R + (Math.random()-0.5)*30,
+      y: h/2 + Math.sin(a)*R + (Math.random()-0.5)*30,
+      vx:0, vy:0, fx:null, fy:null };
+  });
+  const byId = {}; nodes.forEach(n => byId[n.id]=n);
+  const links = gData.edges
+    .map(e => ({ source:byId[e.source], target:byId[e.target], kind:e.kind, weight:e.weight }))
+    .filter(l => l.source && l.target);
+  gSim = { nodes, byId, links, alpha:1 };
+  buildGraphDom();
+  tick();
+}
+
+function tick(){
+  const { w, h } = svgSize();
+  const { nodes, links } = gSim, k = gSim.alpha, REP = 1600, LEN = 95;
+  for (let i=0;i<nodes.length;i++){
+    for (let j=i+1;j<nodes.length;j++){
+      const a=nodes[i], b=nodes[j];
+      let dx=a.x-b.x, dy=a.y-b.y, d2=dx*dx+dy*dy||0.01, d=Math.sqrt(d2), f=REP/d2;
+      const fx=dx/d*f, fy=dy/d*f;
+      a.vx+=fx; a.vy+=fy; b.vx-=fx; b.vy-=fy;
+    }
+  }
+  links.forEach(l => {
+    let dx=l.target.x-l.source.x, dy=l.target.y-l.source.y, d=Math.sqrt(dx*dx+dy*dy)||0.01;
+    const f=(d-LEN)*(l.kind==='link'?0.08:0.03), fx=dx/d*f, fy=dy/d*f;
+    l.source.vx+=fx; l.source.vy+=fy; l.target.vx-=fx; l.target.vy-=fy;
+  });
+  nodes.forEach(n => {
+    n.vx += (w/2-n.x)*0.002; n.vy += (h/2-n.y)*0.002;
+    if (n.fx!=null){ n.x=n.fx; n.y=n.fy; n.vx=0; n.vy=0; return; }
+    n.vx*=0.86; n.vy*=0.86; n.x+=n.vx*k; n.y+=n.vy*k;
+  });
+  gSim.alpha *= 0.99;
+  renderGraphPositions();
+  if (gSim.alpha > 0.02) gRAF = requestAnimationFrame(tick); else gRAF = null;
+}
+
+function buildGraphDom(){
+  const svg = $('graph');
+  svg.innerHTML = `<g id="groot"><g id="gedges"></g><g id="gnodes"></g></g>`;
+  svg.querySelector('#gedges').innerHTML = gSim.links
+    .map((l,i) => `<line class="gedge ge-${l.kind}" data-i="${i}"></line>`).join('');
+  svg.querySelector('#gnodes').innerHTML = gSim.nodes.map((n,i) => {
+    const r = 6 + Math.min(14, Math.sqrt(n.chunks||1)*1.4);
+    const col = KIND_COLOR[n.kind] || '#7fe9ff';
+    const t = n.title.length>34 ? n.title.slice(0,33)+'…' : n.title;
+    return `<g class="gnode" data-i="${i}">
+      <circle r="${r.toFixed(1)}" fill="${col}" fill-opacity="0.85" stroke="#04070d" stroke-width="1.5"></circle>
+      <text x="${(r+3).toFixed(1)}" y="4" class="glabel">${esc(t)}</text></g>`;
+  }).join('');
+  attachGraphEvents();
+  applyTransform();
+  drawGraph();
+}
+
+function renderGraphPositions(){
+  const lines = $('graph').querySelectorAll('.gedge');
+  gSim.links.forEach((l,i) => {
+    const el=lines[i]; if(!el) return;
+    el.setAttribute('x1',l.source.x.toFixed(1)); el.setAttribute('y1',l.source.y.toFixed(1));
+    el.setAttribute('x2',l.target.x.toFixed(1)); el.setAttribute('y2',l.target.y.toFixed(1));
+  });
+  const gs = $('graph').querySelectorAll('.gnode');
+  gSim.nodes.forEach((n,i) => { const el=gs[i]; if(el) el.setAttribute('transform',`translate(${n.x.toFixed(1)},${n.y.toFixed(1)})`); });
+}
+
+function attachGraphEvents(){
+  $('graph').querySelectorAll('.gnode').forEach(el => {
+    const i = +el.dataset.i, n = gSim.nodes[i];
+    el.addEventListener('mouseenter', () => highlightNode(i, true));
+    el.addEventListener('mouseleave', () => highlightNode(i, false));
+    el.addEventListener('mousedown', ev => startNodeDrag(ev, i));
+    el.addEventListener('click', () => { if (el._dragged){ el._dragged=false; return; } show('papers'); openPaper(n.id); });
+  });
+}
+function startNodeDrag(ev, i){
+  ev.preventDefault(); ev.stopPropagation();
+  const n = gSim.nodes[i], el = $('graph').querySelectorAll('.gnode')[i];
+  const move = mev => { const p=toGraph(mev); n.fx=p.x; n.fy=p.y; el._dragged=true; gSim.alpha=Math.max(gSim.alpha,0.3); if(!gRAF) tick(); };
+  const up = () => { document.removeEventListener('mousemove',move); document.removeEventListener('mouseup',up); n.fx=null; n.fy=null; };
+  document.addEventListener('mousemove', move); document.addEventListener('mouseup', up);
+}
+function highlightNode(i, on){
+  const n = gSim.nodes[i], nbr = new Set([n.id]);
+  gSim.links.forEach(l => { if(l.source.id===n.id) nbr.add(l.target.id); if(l.target.id===n.id) nbr.add(l.source.id); });
+  $('graph').querySelectorAll('.gnode').forEach((el,j) => { el.style.opacity = (!on||nbr.has(gSim.nodes[j].id)) ? '' : '0.15'; });
+  $('graph').querySelectorAll('.gedge').forEach((el,j) => {
+    const l = gSim.links[j], inc = l.source.id===n.id || l.target.id===n.id;
+    el.classList.toggle('hot', on && inc);
+    el.style.opacity = on ? (inc ? '1' : '0.05') : '';
+  });
+  const info = $('ginfo');
+  if (on){ info.style.display='block'; info.innerHTML = `<b>${esc(n.title)}</b><br><span class="gsub">${esc(n.kind)} · ${n.chunks} chunks · ${n.deg} connections</span>`; }
+  else { info.style.display='none'; info.innerHTML=''; }
+}
+
+// Apply the link/similar filters and the highlight query without re-laying out.
+function drawGraph(){
+  if (!gSim) return;
+  const showLink = $('g-links').checked, showSim = $('g-similar').checked;
+  const q = $('g-search').value.toLowerCase().trim();
+  $('graph').querySelectorAll('.gedge').forEach((el,j) => {
+    const l = gSim.links[j], vis = (l.kind==='link'&&showLink) || (l.kind==='similar'&&showSim);
+    el.style.display = vis ? '' : 'none';
+  });
+  $('graph').querySelectorAll('.gnode').forEach((el,j) => {
+    const n = gSim.nodes[j];
+    const match = q && (n.title.toLowerCase().includes(q) || (n.tags||[]).some(t => t.toLowerCase().includes(q)));
+    el.classList.toggle('match', !!match);
+    el.style.opacity = (!q || match) ? '' : '0.2';
+  });
 }
 
 /* ---------- boot ---------- */

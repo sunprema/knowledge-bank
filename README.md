@@ -245,21 +245,43 @@ startup (override with `KB_API_KEY`, rotate with `kb rotate-key`).
 | `GET /papers` | list documents (`?tag=`, `?category=`) |
 | `GET /papers/{id}` | metadata + notes + PDF path |
 | `POST /search` | semantic search (body: `query`, `mode`, `k`, filters) |
+| `GET /papers/{id}/similar` | documents most similar to this one (`?limit=`) |
+| `GET /graph` | the corpus as nodes + edges (`?neighbors=` similarity edges per node) |
+| `POST /chat` | RAG answer over the corpus, with cited sources (body: `query`, optional `history`) |
 | `POST /papers/{id}/notes` | append a note and re-embed |
 | `GET /chunks/{id}` | full chunk text + deep link |
 | `GET /open/{id}` | 302 redirect to the PDF deep link |
 
 The web app needs no build step. Open the `http://127.0.0.1:4321/?key=…`
 link printed by `kb serve` — it seeds the key into your browser
-(`localStorage`) — and you get three views: **Papers** (filter by
-text/tag/category/kind; open any document's abstract, notes, and PDF
-deep-link), **Search** (narrow/wide semantic search with per-chunk
-scores and deep-links, cross-linking into the paper detail), and
-**Analytics** (document/chunk counts, chunks-per-section breakdown, and
-a tag cloud).
+(`localStorage`) — and you get five views:
 
-Planned for v0.2: `kb similar` (papers near this one) and `kb excerpt`
-(compile chosen sections into one PDF).
+- **Papers** — filter by text/tag/category/kind; open any document's
+  abstract, notes, and PDF deep-link. Each detail panel also shows a
+  **Related** list: the documents most similar to this one (by the mean of
+  its chunk embeddings), so you can wander the corpus by proximity.
+- **Search** — narrow/wide semantic search with per-chunk scores and
+  deep-links, cross-linking into the paper detail.
+- **Chat** — ask a question and get an answer synthesized over the corpus
+  (wide retrieval → the chat model), with every claim cited `[n]` back to the
+  source document and PDF page. Citations and the source list open the PDF
+  panel at the right page. Multi-turn: follow-ups keep the prior context.
+- **Graph** — the whole corpus as a force-directed graph: a node per
+  document (sized by indexed chunk count, colored by kind), edges from
+  explicit `[[id]]`/`--link`/`--scope` relations plus nearest-neighbor
+  *similarity* edges. Drag nodes, pan/zoom, filter edge types, highlight by
+  text, click a node to open the document.
+- **Analytics** — document/chunk counts, chunks-per-section breakdown, and a
+  tag cloud.
+
+**Chat** uses OpenAI chat-completions (so it shares the single
+`OPENAI_API_KEY` the embedding pipeline already needs); the model and context
+size are configurable under `[chat]` in `config.toml` (default
+`gpt-4o-mini`, 12 context chunks). **Related** and **Graph** similarity reuse
+the embedding cache, so they cost no API calls.
+
+Planned for v0.2: `kb similar` (the CLI twin of the web app's Related panel)
+and `kb excerpt` (compile chosen sections into one PDF).
 
 ## Claude Code integration
 

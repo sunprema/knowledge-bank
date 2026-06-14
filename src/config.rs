@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 pub struct Config {
     pub schema_version: u32,
     pub embedding: EmbeddingConfig,
+    pub chat: ChatConfig,
     pub turbovec: TurbovecConfig,
     pub search: SearchConfig,
     pub ingest: IngestConfig,
@@ -24,6 +25,7 @@ impl Default for Config {
         Config {
             schema_version: SCHEMA_VERSION,
             embedding: EmbeddingConfig::default(),
+            chat: ChatConfig::default(),
             turbovec: TurbovecConfig::default(),
             search: SearchConfig::default(),
             ingest: IngestConfig::default(),
@@ -47,6 +49,32 @@ impl Default for EmbeddingConfig {
             provider: "openai".into(),
             model: "text-embedding-3-small".into(),
             dimensions: 1536,
+        }
+    }
+}
+
+/// Chat-over-corpus (`POST /chat`, web app "Chat" view): a RAG layer that
+/// answers questions over the corpus with inline citations. Uses OpenAI
+/// chat-completions so it shares the single `OPENAI_API_KEY` the embedding
+/// pipeline already needs — no second provider/credential.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ChatConfig {
+    pub provider: String,
+    pub model: String,
+    /// How many retrieved chunks to feed the model as numbered sources.
+    pub max_context_chunks: usize,
+    /// Sampling temperature — low keeps answers grounded in the sources.
+    pub temperature: f32,
+}
+
+impl Default for ChatConfig {
+    fn default() -> Self {
+        ChatConfig {
+            provider: "openai".into(),
+            model: "gpt-4o-mini".into(),
+            max_context_chunks: 12,
+            temperature: 0.2,
         }
     }
 }

@@ -101,7 +101,10 @@ fn router(state: Shared) -> Router {
         .route("/papers", get(list_papers))
         .route("/papers/{paper_id}", get(get_paper))
         .route("/papers/{paper_id}/notes", post(add_note))
+        .route("/papers/{paper_id}/similar", get(similar))
+        .route("/graph", get(graph))
         .route("/search", post(search))
+        .route("/chat", post(chat))
         .route("/chunks/{chunk_id}", get(get_chunk))
         .route("/pdf/{paper_id}", get(get_pdf))
         .route("/open/{chunk_id}", get(open_chunk))
@@ -393,6 +396,73 @@ async fn search(
     })
     .await?;
     Ok(Json(response))
+}
+
+#[derive(Deserialize)]
+struct SimilarQuery {
+    limit: Option<usize>,
+}
+
+/// Documents most similar to `{paper_id}` (the "Related" panel). Embeds across
+/// `.await` while holding the stores, so it runs on a blocking thread.
+async fn similar(
+    State(state): State<Shared>,
+    Path(paper_id): Path<String>,
+    Query(q): Query<SimilarQuery>,
+) -> Result<Json<retrieval::SimilarResponse>, ApiError> {
+    let limit = q.limit.unwrap_or(8).clamp(1, 50);
+    let paths = state.paths.clone();
+    let config = state.config.clone();
+    let resp = run_blocking(move || async move {
+        retrieval::similar_papers(&paths, &config, &paper_id, limit).await
+    })
+    .await?;
+    Ok(Json(resp))
+}
+
+#[derive(Deserialize)]
+struct GraphQuery {
+    /// Nearest-neighbor "similar" edges per node (0 = explicit links only).
+    neighbors: Option<usize>,
+}
+
+async fn graph(
+    State(state): State<Shared>,
+    Query(q): Query<GraphQuery>,
+) -> Result<Json<retrieval::GraphResponse>, ApiError> {
+    let neighbors = q.neighbors.unwrap_or(3).min(10);
+    let paths = state.paths.clone();
+    let config = state.config.clone();
+    // Heavy (a centroid + index search per node) and touches the !Send MetaDb;
+    // run it off the async worker.
+    let resp = run_blocking(move || async move {
+        retrieval::knowledge_graph(&paths, &config, neighbors)
+    })
+    .await?;
+    Ok(Json(resp))
+}
+
+#[derive(Deserialize)]
+struct ChatRequest {
+    query: String,
+    #[serde(default)]
+    history: Vec<crate::chat::ChatMessage>,
+}
+
+/// Chat-over-corpus: wide-retrieve context, answer with the chat model, return
+/// the answer plus cited sources. Requires `OPENAI_API_KEY` (same key the rest
+/// of the KB uses).
+async fn chat(
+    State(state): State<Shared>,
+    Json(req): Json<ChatRequest>,
+) -> Result<Json<retrieval::ChatResponse>, ApiError> {
+    let paths = state.paths.clone();
+    let config = state.config.clone();
+    let resp = run_blocking(move || async move {
+        retrieval::chat(&paths, &config, &req.query, &req.history).await
+    })
+    .await?;
+    Ok(Json(resp))
 }
 
 #[derive(Deserialize)]

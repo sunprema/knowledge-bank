@@ -1,6 +1,7 @@
 //! Retrieval: embed query → turbovec search (allowlist for filters) →
 //! meta.db hydration → paper-level grouping (PRD §5).
 
+use crate::chat::{ChatMessage, OpenAiChat};
 use crate::config::{Config, KbPaths};
 use crate::embed::OpenAiEmbedder;
 use crate::index::{consistency_check, MetaDb, VectorIndex};
@@ -378,6 +379,420 @@ pub async fn search(
         papers: groups,
         total_chunks,
     })
+}
+
+// ===========================================================================
+// Similar papers, knowledge graph, and chat-over-corpus — three web-app
+// features built on the same vector store. They share the centroid helper
+// below: a document's "position" in embedding space is the mean of its cached
+// chunk vectors, so neighbor lookups cost no API calls.
+// ===========================================================================
+
+/// One related document (`GET /papers/{id}/similar`).
+#[derive(Debug, Clone, Serialize)]
+pub struct SimilarPaper {
+    pub paper_id: String,
+    pub score: f32,
+    pub title: String,
+    pub authors: Vec<String>,
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    pub categories: Vec<String>,
+    pub tags: Vec<String>,
+    pub published_at: String,
+    pub has_pdf: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SimilarResponse {
+    pub paper_id: String,
+    pub papers: Vec<SimilarPaper>,
+}
+
+/// A node in the knowledge graph (`GET /graph`) — one document.
+#[derive(Debug, Clone, Serialize)]
+pub struct GraphNode {
+    pub id: String,
+    pub title: String,
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    pub tags: Vec<String>,
+    pub categories: Vec<String>,
+    pub published_at: String,
+    /// Indexed chunk count — lets the UI size nodes by how much we know.
+    pub chunks: usize,
+}
+
+/// An edge in the knowledge graph. `kind` is `"link"` (an explicit `[[id]]` /
+/// `--link` / `--scope` relation) or `"similar"` (a nearest-neighbor edge).
+#[derive(Debug, Clone, Serialize)]
+pub struct GraphEdge {
+    pub source: String,
+    pub target: String,
+    pub kind: String,
+    pub weight: f32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GraphResponse {
+    pub nodes: Vec<GraphNode>,
+    pub edges: Vec<GraphEdge>,
+}
+
+/// A cited source backing a chat answer (`POST /chat`).
+#[derive(Debug, Clone, Serialize)]
+pub struct ChatSource {
+    /// 1-based citation number, matching the `[n]` markers in the answer.
+    pub n: usize,
+    pub paper_id: String,
+    pub title: String,
+    pub section_type: String,
+    pub page: Option<u32>,
+    pub chunk_id: String,
+    pub snippet: String,
+    pub has_pdf: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ChatResponse {
+    pub answer: String,
+    pub sources: Vec<ChatSource>,
+}
+
+/// L2-normalize in place (no-op for a zero vector).
+fn l2_normalize(v: &mut [f32]) {
+    let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm > 0.0 {
+        for x in v.iter_mut() {
+            *x /= norm;
+        }
+    }
+}
+
+/// Mean of a document's cached chunk vectors, L2-normalized — its centroid in
+/// embedding space. `None` if none of its chunks have a cached embedding (e.g.
+/// after `kb cache clear`), in which case callers fall back to re-embedding.
+/// Reuses the embedding cache, so this costs no API calls.
+fn cached_centroid(db: &MetaDb, paper_id: &str) -> Result<Option<Vec<f32>>, KbError> {
+    let chunks = db.chunks_for_paper(paper_id)?;
+    let mut sum: Vec<f32> = Vec::new();
+    let mut n = 0usize;
+    for c in &chunks {
+        if let Some(v) = db.cache_get(&c.content_hash, &c.embedding_model, c.embedding_version)? {
+            if sum.is_empty() {
+                sum = vec![0.0; v.len()];
+            }
+            if v.len() == sum.len() {
+                for (s, x) in sum.iter_mut().zip(&v) {
+                    *s += x;
+                }
+                n += 1;
+            }
+        }
+    }
+    if n == 0 {
+        return Ok(None);
+    }
+    let inv = 1.0 / n as f32;
+    for s in sum.iter_mut() {
+        *s *= inv;
+    }
+    l2_normalize(&mut sum);
+    Ok(Some(sum))
+}
+
+/// Best chunk score per *other* document near `query_vec`, excluding
+/// `exclude`. Over-fetches a chunk pool, then collapses to paper level.
+fn nearest_papers(
+    db: &MetaDb,
+    index: &VectorIndex,
+    query_vec: &[f32],
+    exclude: &str,
+    pool: usize,
+) -> Result<Vec<(String, f32)>, KbError> {
+    let ranked = index.search(query_vec, pool, None)?;
+    let ordered_ids: Vec<i64> = ranked.iter().map(|(id, _)| *id as i64).collect();
+    let score_of: HashMap<i64, f32> = ranked.iter().map(|(id, s)| (*id as i64, *s)).collect();
+
+    let mut best: Vec<(String, f32)> = Vec::new();
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    for rec in db.chunks_by_vector_ids(&ordered_ids)? {
+        if rec.paper_id == exclude {
+            continue;
+        }
+        let s = score_of.get(&rec.vector_id).copied().unwrap_or(0.0);
+        match seen.get(&rec.paper_id) {
+            Some(&i) => {
+                if s > best[i].1 {
+                    best[i].1 = s;
+                }
+            }
+            None => {
+                seen.insert(rec.paper_id.clone(), best.len());
+                best.push((rec.paper_id.clone(), s));
+            }
+        }
+    }
+    best.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+    Ok(best)
+}
+
+/// Documents most similar to `paper_id` (web app "Related" panel). Uses the
+/// paper's cached centroid; if nothing is cached, re-embeds its title +
+/// abstract as a fallback so the feature still works on a cleared cache.
+pub async fn similar_papers(
+    paths: &KbPaths,
+    config: &Config,
+    paper_id: &str,
+    limit: usize,
+) -> Result<SimilarResponse, KbError> {
+    let meta_path = paths.metadata_path(paper_id);
+    if !meta_path.exists() {
+        return Err(KbError::NotFound(format!("{paper_id} is not in the KB")));
+    }
+    let (db, index) = open_stores_for_query(paths, config)?;
+    let empty = SimilarResponse {
+        paper_id: paper_id.to_string(),
+        papers: Vec::new(),
+    };
+    if index.is_empty() {
+        return Ok(empty);
+    }
+
+    let centroid = match cached_centroid(&db, paper_id)? {
+        Some(c) => c,
+        None => {
+            let meta = PaperMetadata::load(&meta_path)?;
+            let text = format!("{}\n\n{}", meta.title, meta.abstract_text);
+            embed_query(config, &text).await?
+        }
+    };
+
+    // Over-fetch chunks so several distinct papers survive grouping.
+    let pool = (limit + 1).saturating_mul(12).clamp(20, 300);
+    let mut best = nearest_papers(&db, &index, &centroid, paper_id, pool)?;
+    best.truncate(limit);
+
+    let papers = best
+        .into_iter()
+        .map(|(id, score)| {
+            let meta = PaperMetadata::load(&paths.metadata_path(&id))
+                .unwrap_or_else(|_| placeholder_meta(&id));
+            SimilarPaper {
+                has_pdf: paths.pdf_path(&id).exists(),
+                paper_id: id,
+                score,
+                title: meta.title,
+                authors: meta.authors,
+                kind: meta.kind.as_str().to_string(),
+                project: meta.project,
+                categories: meta.categories,
+                tags: meta.tags,
+                published_at: meta.published_at,
+            }
+        })
+        .collect();
+
+    Ok(SimilarResponse {
+        paper_id: paper_id.to_string(),
+        papers,
+    })
+}
+
+/// The whole corpus as a graph: a node per document, edges from explicit
+/// `links` plus `neighbors` nearest-neighbor "similar" edges per document (set
+/// `neighbors = 0` for links only). An explicit link always wins over a
+/// similarity edge for the same pair.
+pub fn knowledge_graph(
+    paths: &KbPaths,
+    config: &Config,
+    neighbors: usize,
+) -> Result<GraphResponse, KbError> {
+    let ids = paths.list_paper_ids()?;
+    let id_set: HashSet<String> = ids.iter().cloned().collect();
+    let (db, index) = open_stores_for_query(paths, config)?;
+
+    let mut nodes: Vec<GraphNode> = Vec::new();
+    let mut metas: HashMap<String, PaperMetadata> = HashMap::new();
+    for id in &ids {
+        let meta = match PaperMetadata::load(&paths.metadata_path(id)) {
+            Ok(m) => m,
+            Err(_) => continue, // a mid-delete/mangled folder shouldn't kill the graph
+        };
+        nodes.push(GraphNode {
+            id: id.clone(),
+            title: meta.title.clone(),
+            kind: meta.kind.as_str().to_string(),
+            project: meta.project.clone(),
+            tags: meta.tags.clone(),
+            categories: meta.categories.clone(),
+            published_at: meta.published_at.clone(),
+            chunks: db.chunks_for_paper(id)?.len(),
+        });
+        metas.insert(id.clone(), meta);
+    }
+
+    // Undirected edge dedup keyed by the ordered endpoint pair.
+    let pair = |a: &str, b: &str| -> (String, String) {
+        if a <= b {
+            (a.to_string(), b.to_string())
+        } else {
+            (b.to_string(), a.to_string())
+        }
+    };
+    let mut edge_index: HashMap<(String, String), usize> = HashMap::new();
+    let mut edges: Vec<GraphEdge> = Vec::new();
+
+    // Explicit link edges first, so they take precedence over similarity.
+    for node in &nodes {
+        let Some(meta) = metas.get(&node.id) else { continue };
+        for target in &meta.links {
+            if target == &node.id || !id_set.contains(target) {
+                continue;
+            }
+            let k = pair(&node.id, target);
+            edge_index.entry(k.clone()).or_insert_with(|| {
+                edges.push(GraphEdge {
+                    source: k.0.clone(),
+                    target: k.1.clone(),
+                    kind: "link".into(),
+                    weight: 1.0,
+                });
+                edges.len() - 1
+            });
+        }
+    }
+
+    // Similarity edges from each document's nearest neighbors.
+    if neighbors > 0 && !index.is_empty() {
+        let pool = (neighbors + 1).saturating_mul(12).clamp(20, 200);
+        for node in &nodes {
+            let Some(centroid) = cached_centroid(&db, &node.id)? else {
+                continue;
+            };
+            let mut near = nearest_papers(&db, &index, &centroid, &node.id, pool)?;
+            near.retain(|(id, _)| id_set.contains(id));
+            near.truncate(neighbors);
+            for (other, score) in near {
+                let k = pair(&node.id, &other);
+                match edge_index.get(&k) {
+                    Some(&i) => {
+                        // Keep links; for an existing similar edge keep the max.
+                        if edges[i].kind == "similar" && score > edges[i].weight {
+                            edges[i].weight = score;
+                        }
+                    }
+                    None => {
+                        edge_index.insert(k.clone(), edges.len());
+                        edges.push(GraphEdge {
+                            source: k.0.clone(),
+                            target: k.1.clone(),
+                            kind: "similar".into(),
+                            weight: score,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(GraphResponse { nodes, edges })
+}
+
+/// Answer a question over the corpus with inline citations (web app "Chat").
+/// Wide-retrieves a context pool, feeds the numbered chunks to the chat model,
+/// and returns the answer plus the cited sources (each deep-linkable to its
+/// PDF page). `history` carries prior turns for follow-ups.
+pub async fn chat(
+    paths: &KbPaths,
+    config: &Config,
+    query: &str,
+    history: &[ChatMessage],
+) -> Result<ChatResponse, KbError> {
+    let query = query.trim();
+    if query.is_empty() {
+        return Err(KbError::Usage("chat query is empty".into()));
+    }
+
+    let k = config.chat.max_context_chunks.clamp(1, 40);
+    let res = search(
+        paths,
+        config,
+        query,
+        SearchMode::Wide,
+        Some(k),
+        SearchFilters::default(),
+    )
+    .await?;
+
+    // Flatten ranked chunks across paper groups, best score first, capped at k.
+    let mut flat: Vec<(&PaperGroup, &ChunkHit)> = Vec::new();
+    for g in &res.papers {
+        for c in &g.chunks {
+            flat.push((g, c));
+        }
+    }
+    flat.sort_by(|a, b| b.1.score.total_cmp(&a.1.score));
+    flat.truncate(k);
+
+    if flat.is_empty() {
+        return Ok(ChatResponse {
+            answer: "I couldn't find anything in your knowledge base relevant to that question."
+                .to_string(),
+            sources: Vec::new(),
+        });
+    }
+
+    // The search response carries only snippets; hydrate full chunk text so the
+    // model reasons over the whole passage, not a 200-char preview.
+    let db = MetaDb::open(&paths.meta_db_path())?;
+    let mut sources = Vec::new();
+    let mut context = String::new();
+    for (i, (g, c)) in flat.iter().enumerate() {
+        let n = i + 1;
+        let text = db
+            .chunk_by_chunk_id(&c.chunk_id)?
+            .map(|r| r.text)
+            .unwrap_or_else(|| c.snippet.clone());
+        context.push_str(&format!(
+            "[{n}] \"{}\" — {} section\n{}\n\n",
+            g.paper.title,
+            c.section_type,
+            text.trim()
+        ));
+        sources.push(ChatSource {
+            n,
+            paper_id: g.paper_id.clone(),
+            title: g.paper.title.clone(),
+            section_type: c.section_type.clone(),
+            page: c.page,
+            chunk_id: c.chunk_id.clone(),
+            snippet: c.snippet.clone(),
+            has_pdf: paths.pdf_path(&g.paper_id).exists(),
+        });
+    }
+
+    let system = "You are a research assistant answering questions over the user's personal \
+        knowledge base of papers, ideas, and reflections. Answer ONLY from the numbered sources \
+        provided. Cite the sources you use inline with their bracketed numbers, e.g. [1] or \
+        [2][3]. Be concise and precise. If the sources don't contain enough to answer, say so \
+        plainly rather than guessing.";
+
+    let mut messages = vec![ChatMessage::system(system)];
+    // Carry prior turns (drop any client-supplied system role).
+    for m in history {
+        if m.is_valid_role() && m.role != "system" {
+            messages.push(m.clone());
+        }
+    }
+    messages.push(ChatMessage::user(format!("Question: {query}\n\nSources:\n{context}")));
+
+    let client = OpenAiChat::from_env(&config.chat.model)?;
+    let answer = client.complete(&messages, config.chat.temperature).await?;
+
+    Ok(ChatResponse { answer, sources })
 }
 
 /// Exponential recency term in `(0, 1]` from a chunk's `embedded_at`
