@@ -110,6 +110,17 @@ synthesis questions where you want broad material to reason over.
 the search. Results are grouped per paper, each chunk with its score,
 section type, snippet, and a `file://…#page=N` deep link into the PDF.
 
+Ranking isn't cosine-only. Following the Generative Agents retrieval
+model (arXiv:2304.03442, in this very corpus), each candidate is scored
+on a blend of **relevance** (cosine), **recency** (recently added/edited
+material decays slowly upward), and **importance** (a section-type prior
+— your reflections and notes outrank raw paper prose, `future_work`
+outranks background). Relevance stays dominant; recency and importance
+break near-ties so freshly captured and high-value material surfaces.
+The cosine floor still gates candidates first, so it remains a true
+relevance floor. Tune or disable the weights under `[search.ranking]`
+(see [CONFIG.md](./CONFIG.md)).
+
 ### Capturing ideas
 
 ```bash

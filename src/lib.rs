@@ -195,6 +195,33 @@ impl SectionType {
     pub fn parse(s: &str) -> Option<Self> {
         Self::ALL.iter().copied().find(|t| t.as_str() == s)
     }
+
+    /// Intrinsic importance prior in `[0, 1]`, used as the `importance` term
+    /// of recency/importance-weighted retrieval (cf. Generative Agents,
+    /// arXiv:2304.03442, whose retrieval blends relevance + recency +
+    /// importance rather than ranking on similarity alone).
+    ///
+    /// The ordering encodes the KB's own thesis — "today's synthesis
+    /// compounds into tomorrow's context": the user's distilled reflections
+    /// and notes outrank raw paper prose, and `future_work` (what to build)
+    /// outranks background. This only ever breaks near-ties; with the default
+    /// weights relevance still dominates the blended score.
+    pub fn importance_prior(&self) -> f32 {
+        match self {
+            SectionType::Reflection => 1.00,
+            SectionType::UserNotes => 0.90,
+            SectionType::FutureWork => 0.80,
+            SectionType::Abstract => 0.75,
+            SectionType::Conclusion => 0.70,
+            SectionType::Applications => 0.65,
+            SectionType::Introduction => 0.60,
+            SectionType::Method => 0.60,
+            SectionType::Limitations => 0.55,
+            SectionType::Experiments => 0.50,
+            SectionType::Background => 0.45,
+            SectionType::Other => 0.35,
+        }
+    }
 }
 
 impl fmt::Display for SectionType {

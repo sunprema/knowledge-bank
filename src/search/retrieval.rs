@@ -4,7 +4,8 @@
 use crate::config::{Config, KbPaths};
 use crate::embed::OpenAiEmbedder;
 use crate::index::{consistency_check, MetaDb, VectorIndex};
-use crate::{deep_link, DocKind, KbError, PaperMetadata, SectionType};
+use crate::{deep_link, ChunkRecord, DocKind, KbError, PaperMetadata, SectionType};
+use chrono::{DateTime, Utc};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -210,10 +211,17 @@ pub async fn search(
         SearchMode::Wide => config.search.default_min_score_wide,
     };
 
+    let ranking = &config.search.ranking;
+    // Over-fetch a candidate pool so recency/importance can promote a chunk
+    // into the top `k` that pure cosine ranked just outside it (Generative
+    // Agents, arXiv:2304.03442, retrieve a pool then rank — not rank-the-top-k).
+    let pool_k = k.saturating_mul(ranking.candidate_multiplier.max(1)).max(k);
     let query_vec = embed_query(config, query).await?;
-    let ranked = index.search(&query_vec, k, allowlist.as_deref())?;
+    let ranked = index.search(&query_vec, pool_k, allowlist.as_deref())?;
 
-    let scores: HashMap<i64, f32> = ranked
+    // The cosine floor gates candidates *before* blending, so it stays a true
+    // relevance floor regardless of the ranking weights.
+    let cosine: HashMap<i64, f32> = ranked
         .iter()
         .filter(|(_, s)| *s >= min_score)
         .map(|(id, s)| (*id as i64, *s))
@@ -224,18 +232,31 @@ pub async fn search(
         .map(|(id, _)| *id as i64)
         .collect();
 
-    let records = db.chunks_by_vector_ids(&ordered_ids)?;
+    // Blend relevance + recency + importance, rerank, keep top `k`. The
+    // reported `score` is this blended value — what the ordering is on.
+    let now = Utc::now();
+    let mut ranked_records: Vec<(ChunkRecord, f32)> = db
+        .chunks_by_vector_ids(&ordered_ids)?
+        .into_iter()
+        .filter_map(|rec| {
+            let relevance = *cosine.get(&rec.vector_id)?;
+            let recency = recency_factor(&rec.embedded_at, now, ranking.recency_half_life_days);
+            let importance = rec.section_type.importance_prior();
+            let blended = ranking.relevance_weight * relevance
+                + ranking.recency_weight * recency
+                + ranking.importance_weight * importance;
+            Some((rec, blended))
+        })
+        .collect();
+    ranked_records.sort_by(|a, b| b.1.total_cmp(&a.1));
+    ranked_records.truncate(k);
 
     // Group by paper, preserving rank order of first appearance.
     let mut groups: Vec<PaperGroup> = Vec::new();
     let mut group_of: HashMap<String, usize> = HashMap::new();
     let mut total_chunks = 0usize;
 
-    for rec in records {
-        let score = match scores.get(&rec.vector_id) {
-            Some(s) => *s,
-            None => continue,
-        };
+    for (rec, score) in ranked_records {
         // Notes have no PDF; deep-link to the idea body instead.
         let pdf = paths.pdf_path(&rec.paper_id);
         let target = if pdf.exists() { pdf } else { paths.idea_path(&rec.paper_id) };
@@ -293,6 +314,19 @@ pub async fn search(
     })
 }
 
+/// Exponential recency term in `(0, 1]` from a chunk's `embedded_at`
+/// timestamp: `1.0` for something embedded now, `0.5` at `half_life_days`,
+/// decaying toward 0. An unparseable or future timestamp is treated as
+/// neutral (`0.5`) rather than failing the search.
+fn recency_factor(embedded_at: &str, now: DateTime<Utc>, half_life_days: f32) -> f32 {
+    let Ok(t) = DateTime::parse_from_rfc3339(embedded_at) else {
+        return 0.5;
+    };
+    let age_days = (now - t.with_timezone(&Utc)).num_seconds() as f32 / 86_400.0;
+    let age_days = age_days.max(0.0);
+    (-std::f32::consts::LN_2 * age_days / half_life_days.max(1.0)).exp()
+}
+
 /// A paper folder may be mid-delete or hand-mangled; search shouldn't die
 /// on one bad metadata.json (PRD: derived state must never hold canonical
 /// state hostage).
@@ -315,5 +349,56 @@ fn placeholder_meta(paper_id: &str) -> PaperMetadata {
         main_tex: None,
         tags: Vec::new(),
         schema_version: crate::SCHEMA_VERSION,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Duration;
+
+    #[test]
+    fn recency_decays_by_half_life() {
+        let now = Utc::now();
+        let just_now = now.to_rfc3339();
+        let half = (now - Duration::days(180)).to_rfc3339();
+        let old = (now - Duration::days(720)).to_rfc3339();
+
+        assert!((recency_factor(&just_now, now, 180.0) - 1.0).abs() < 0.01);
+        assert!((recency_factor(&half, now, 180.0) - 0.5).abs() < 0.01);
+        // Strictly monotonic: older ⇒ smaller.
+        assert!(recency_factor(&old, now, 180.0) < recency_factor(&half, now, 180.0));
+    }
+
+    #[test]
+    fn recency_handles_bad_and_future_timestamps() {
+        let now = Utc::now();
+        assert_eq!(recency_factor("not-a-date", now, 180.0), 0.5);
+        let future = (now + Duration::days(30)).to_rfc3339();
+        // Clamped to age 0 ⇒ full recency, never above 1.0.
+        assert!((recency_factor(&future, now, 180.0) - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn importance_prior_ranks_synthesis_above_prose() {
+        assert!(SectionType::Reflection.importance_prior() > SectionType::Method.importance_prior());
+        assert!(SectionType::UserNotes.importance_prior() > SectionType::Other.importance_prior());
+        assert!(SectionType::FutureWork.importance_prior() > SectionType::Background.importance_prior());
+    }
+
+    #[test]
+    fn blend_lets_importance_break_a_cosine_tie() {
+        // Two chunks at equal cosine and equal recency: the higher-importance
+        // section type wins under the default weights.
+        let r = crate::config::RankingConfig::default();
+        let rel = 0.50_f32;
+        let rec = 0.50_f32;
+        let blend = |imp: f32| r.relevance_weight * rel + r.recency_weight * rec + r.importance_weight * imp;
+        let reflection = blend(SectionType::Reflection.importance_prior());
+        let other = blend(SectionType::Other.importance_prior());
+        assert!(reflection > other);
+        // …but the gap stays small relative to a real relevance difference,
+        // so relevance still dominates.
+        assert!(reflection - other < 0.10);
     }
 }

@@ -70,6 +70,7 @@ pub struct SearchConfig {
     pub default_k_wide: usize,
     pub default_min_score_narrow: f32,
     pub default_min_score_wide: f32,
+    pub ranking: RankingConfig,
 }
 
 impl Default for SearchConfig {
@@ -82,6 +83,44 @@ impl Default for SearchConfig {
             // PRD's original 0.72 hid everything — see smoke-test finding).
             default_min_score_narrow: 0.30,
             default_min_score_wide: 0.0,
+            ranking: RankingConfig::default(),
+        }
+    }
+}
+
+/// Recency/importance-weighted ranking (cf. Generative Agents,
+/// arXiv:2304.03442). The final chunk score is a weighted blend
+/// `relevance_weight·cosine + recency_weight·recency + importance_weight·importance`,
+/// where `recency` decays exponentially with the chunk's age since it was
+/// embedded and `importance` is the section-type prior. Defaults keep
+/// relevance dominant — the other terms only break near-ties — so set any
+/// weight to 0 to disable that signal (all three 0 ⇒ relevance-only).
+///
+/// The cosine `default_min_score_*` floor still gates candidates *before*
+/// blending, so it remains a true relevance floor regardless of these weights.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RankingConfig {
+    pub relevance_weight: f32,
+    pub recency_weight: f32,
+    pub importance_weight: f32,
+    /// Age (in days) at which a chunk's recency term halves.
+    pub recency_half_life_days: f32,
+    /// Over-fetch factor: the index returns `k · candidate_multiplier`
+    /// candidates so recency/importance can pull a chunk into the top `k`
+    /// that pure cosine would have ranked just outside it. `1` ⇒ rerank only
+    /// within the cosine top-k (cheaper, but the blend can only reorder).
+    pub candidate_multiplier: usize,
+}
+
+impl Default for RankingConfig {
+    fn default() -> Self {
+        RankingConfig {
+            relevance_weight: 0.85,
+            recency_weight: 0.05,
+            importance_weight: 0.10,
+            recency_half_life_days: 180.0,
+            candidate_multiplier: 4,
         }
     }
 }

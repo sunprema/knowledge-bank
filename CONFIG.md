@@ -74,6 +74,13 @@ default_k_wide = 40
 default_min_score_narrow = 0.3      # see note below
 default_min_score_wide = 0.0
 
+[search.ranking]                    # recency/importance-weighted ranking
+relevance_weight = 0.85             # cosine similarity (kept dominant)
+recency_weight = 0.05               # exp-decay on chunk age
+importance_weight = 0.10            # section-type prior
+recency_half_life_days = 180        # age at which the recency term halves
+candidate_multiplier = 4            # over-fetch k×N, blend, keep top k
+
 [ingest]
 chunk_max_tokens = 2000
 prefer_latex = true
@@ -91,6 +98,18 @@ debounce_ms = 2000
 matches around 0.45–0.60 (not near 1.0), hence the 0.30 narrow floor.
 A KB initialized by an older build may still carry `0.72` in its own
 config.toml — that hides everything; lower it by hand.
+
+**Ranking note:** search no longer ranks on cosine alone. It over-fetches
+`k × candidate_multiplier` candidates (the `default_min_score_*` floor still
+gates them on cosine), then re-ranks each on a blend of relevance (cosine),
+recency (exponential decay on the chunk's `embedded_at` age), and importance
+(a per-section-type prior — reflections and your notes outrank raw paper
+prose), keeping the top `k`. The reported `score` is this blended value.
+Defaults keep relevance dominant — recency and importance only break
+near-ties; set any weight to `0` to disable that signal, or all three
+(`recency_weight`/`importance_weight` = 0) for cosine-only behavior. This is
+the Generative Agents retrieval model (arXiv:2304.03442), which the KB
+already holds.
 
 **Config-change policy (locked design decision):** changing
 `embedding.model`, `dimensions`, or `bit_width` makes existing vectors
