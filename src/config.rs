@@ -12,8 +12,10 @@ use std::path::{Path, PathBuf};
 pub struct Config {
     pub schema_version: u32,
     pub embedding: EmbeddingConfig,
+    pub chat: ChatConfig,
     pub turbovec: TurbovecConfig,
     pub search: SearchConfig,
+    pub cortex: CortexConfig,
     pub ingest: IngestConfig,
     pub server: ServerConfig,
     pub watcher: WatcherConfig,
@@ -24,8 +26,10 @@ impl Default for Config {
         Config {
             schema_version: SCHEMA_VERSION,
             embedding: EmbeddingConfig::default(),
+            chat: ChatConfig::default(),
             turbovec: TurbovecConfig::default(),
             search: SearchConfig::default(),
+            cortex: CortexConfig::default(),
             ingest: IngestConfig::default(),
             server: ServerConfig::default(),
             watcher: WatcherConfig::default(),
@@ -51,6 +55,32 @@ impl Default for EmbeddingConfig {
     }
 }
 
+/// Chat-over-corpus (`POST /chat`, web app "Chat" view): a RAG layer that
+/// answers questions over the corpus with inline citations. Uses OpenAI
+/// chat-completions so it shares the single `OPENAI_API_KEY` the embedding
+/// pipeline already needs — no second provider/credential.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ChatConfig {
+    pub provider: String,
+    pub model: String,
+    /// How many retrieved chunks to feed the model as numbered sources.
+    pub max_context_chunks: usize,
+    /// Sampling temperature — low keeps answers grounded in the sources.
+    pub temperature: f32,
+}
+
+impl Default for ChatConfig {
+    fn default() -> Self {
+        ChatConfig {
+            provider: "openai".into(),
+            model: "gpt-4o-mini".into(),
+            max_context_chunks: 12,
+            temperature: 0.2,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TurbovecConfig {
@@ -72,6 +102,7 @@ pub struct SearchConfig {
     pub default_min_score_wide: f32,
     pub ranking: RankingConfig,
     pub hybrid: HybridConfig,
+    pub graph: GraphRankConfig,
 }
 
 impl Default for SearchConfig {
@@ -86,6 +117,7 @@ impl Default for SearchConfig {
             default_min_score_wide: 0.0,
             ranking: RankingConfig::default(),
             hybrid: HybridConfig::default(),
+            graph: GraphRankConfig::default(),
         }
     }
 }
@@ -119,6 +151,53 @@ impl Default for HybridConfig {
             dense_weight: 1.0,
             lexical_weight: 1.0,
             rrf_k: 60.0,
+        }
+    }
+}
+
+/// Graph-propagated retrieval: a Personalized PageRank pass over a chunk
+/// similarity graph, fused into the hybrid RRF as a third ranked list. This is
+/// HippoRAG's retrieval mechanism (arXiv:2405.14831, in this corpus) — seed PPR
+/// from the query's dense matches, let relevance propagate across edges, rank by
+/// the stationary distribution — so a chunk relevant *because it is linked to*
+/// relevant material surfaces even when its own text shares no tokens with the
+/// query (the single-step multi-hop case pure dense + BM25 both miss).
+///
+/// The faithful adaptation: HippoRAG builds its graph from LLM-extracted
+/// entities (an OpenIE indexing pass + a separate store). We instead walk the
+/// graph signal already in the KB — embedding-similarity kNN edges plus the
+/// explicit `[[id]]` / `--link` / `--scope` relations — so PPR needs no new
+/// index and no extra API calls (seed and neighbor vectors come from the
+/// embedding cache). The subgraph is expanded locally around the dense seeds,
+/// where PPR-with-restart concentrates its mass anyway.
+///
+/// Off by default: when `enabled = false` the search path is byte-for-byte
+/// unchanged. The RRF score for a chunk gains a `graph_weight / (rrf_k + rank)`
+/// term (same `rrf_k` as [`HybridConfig`]) for its rank in the PPR list.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GraphRankConfig {
+    /// `false` ⇒ no PPR pass (dense + lexical only, unchanged).
+    pub enabled: bool,
+    /// Weight of the PPR ranked list in the RRF sum (peer of dense/lexical).
+    pub graph_weight: f32,
+    /// kNN similarity edges expanded per seed chunk when building the subgraph.
+    pub neighbors: usize,
+    /// PPR damping (restart probability is `1 - damping`): lower ⇒ mass stays
+    /// nearer the seeds, higher ⇒ relevance propagates further across hops.
+    pub damping: f32,
+    /// Power-iteration steps. ~15 converges the small per-query subgraph.
+    pub iterations: usize,
+}
+
+impl Default for GraphRankConfig {
+    fn default() -> Self {
+        GraphRankConfig {
+            enabled: false,
+            graph_weight: 1.0,
+            neighbors: 8,
+            damping: 0.5,
+            iterations: 15,
         }
     }
 }
@@ -160,12 +239,74 @@ impl Default for RankingConfig {
     }
 }
 
+/// Cortex — the persistent associative layer (the "brain"). Where retrieval
+/// answers *"what is relevant to this query"*, Cortex answers *"what
+/// unexpected connection is worth noticing"*. On every ingest it materializes
+/// edges between the new document's chunks and the rest of the corpus, but
+/// keeps only the **surprising** ones — connections that are semantically close
+/// yet structurally distant, which is where novel ideas live (pure
+/// nearest-neighbor similarity surfaces the obvious, not the inventive).
+///
+/// Two signals are scored (both API-free — they reuse the embedding cache):
+///
+/// - **need→solution** (directed): one chunk's `future_work`/`limitations`
+///   (a stated need) sits close to another chunk's `method`/`experiments`/
+///   `applications` (a delivered capability). "Someone wished for this;
+///   someone else built it."
+/// - **cross-domain** (undirected): two chunks are close in meaning but their
+///   papers share no arXiv category — the same idea surfacing in a different
+///   field, i.e. a transfer-of-ideas opportunity.
+///
+/// Edges live in `meta.db`'s `cortex_edges` table — derived state, rebuilt by
+/// `kb reindex` (or `kb cortex rebuild`) from the embeddings, never canonical.
+/// Surface them with `kb spark` or the web app's Sparks view.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CortexConfig {
+    /// `false` ⇒ no edges materialized on ingest and `kb spark` stays empty.
+    /// On by default: it costs no API calls and is the point of the system.
+    pub enabled: bool,
+    /// Cross-paper nearest neighbors examined per chunk when looking for
+    /// connections. Higher ⇒ more candidate edges (and more ingest compute).
+    pub neighbors: usize,
+    /// Proximity floor: a pair must reach at least this exact cosine to be a
+    /// connection at all. Calibrated for text-embedding-3-small, whose related
+    /// passages sit around 0.45-0.65 — high enough that an edge means
+    /// something, low enough that genuine cross-field echoes survive.
+    pub min_similarity: f32,
+    /// Cross-domain gate: `1 - Jaccard(categories)` must reach this. `1.0` ⇒
+    /// the papers' arXiv categories must be fully disjoint (default); lower it
+    /// to also surface partial-overlap connections.
+    pub min_domain_distance: f32,
+    /// Default number of sparks returned by `kb spark` / the web view.
+    pub max_sparks: usize,
+}
+
+impl Default for CortexConfig {
+    fn default() -> Self {
+        CortexConfig {
+            enabled: true,
+            neighbors: 6,
+            min_similarity: 0.5,
+            min_domain_distance: 1.0,
+            max_sparks: 50,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct IngestConfig {
     pub chunk_max_tokens: usize,
     pub prefer_latex: bool,
     pub pandoc_path: String,
+    /// LLM fallback for the section classifier: when a heading's deterministic
+    /// classification is `other`, ask the chat model (`[chat] model`) to map it
+    /// to a real section type. One batched call per paper, only for the
+    /// otherwise-`other` headings — the keyword fast-path is unchanged, and the
+    /// call is best-effort (a failure or missing `OPENAI_API_KEY` falls back to
+    /// `other`). The PRD pre-authorized this once the Other ratio exceeds ~25%.
+    pub classify_with_llm: bool,
 }
 
 impl Default for IngestConfig {
@@ -174,6 +315,7 @@ impl Default for IngestConfig {
             chunk_max_tokens: 2000,
             prefer_latex: true,
             pandoc_path: "pandoc".into(),
+            classify_with_llm: true,
         }
     }
 }

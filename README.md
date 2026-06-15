@@ -131,6 +131,15 @@ floor still gates dense candidates first, so it remains a true relevance
 floor. Tune the weights under `[search.ranking]` / `[search.hybrid]`
 (see [CONFIG.md](./CONFIG.md)).
 
+An optional third ranker handles **multi-hop** retrieval. With
+`[search.graph] enabled`, search runs a **Personalized PageRank** pass over a
+chunk similarity graph seeded by the query's dense matches, fused into the same
+RRF — so a chunk relevant *because it links to* relevant material surfaces even
+when its own text shares no tokens with the query. This is HippoRAG's mechanism
+(arXiv:2405.14831, in this corpus), walking the KB's existing similarity and
+`[[id]]` edges instead of an LLM-extracted entity graph — no new index, no extra
+API calls. It's **off by default**; flip it on per-corpus to taste.
+
 ### Capturing ideas
 
 ```bash
@@ -179,6 +188,41 @@ kb search "agent memory" --section reflection           # retrieve stored reflec
 kb search "agent memory" --wide                         # reflections surface here too
 ```
 
+### Cortex — the associative layer (sparks)
+
+```bash
+kb spark                                # the most surprising connections in your corpus
+kb spark --kind need_solution -k 20     # only "someone wished for this; someone built it"
+kb spark --kind cross_domain            # only same-idea-across-fields links
+kb cortex rebuild                       # recompute the whole layer from the embeddings
+```
+
+Cortex is what makes the KB behave less like a search index and more like a
+mind: it keeps forming connections between what you've saved, and surfaces the
+*unexpected* ones. On every ingest it materializes edges from the new
+document's chunks to the rest of the corpus and keeps the **surprising** ones —
+not nearest-neighbor similarity (that only finds near-duplicates), but
+connections that are semantically close yet structurally distant, which is
+where new ideas live. Two signals are scored, **both API-free** (they reuse the
+embedding cache, no extra calls):
+
+- **need → solution** (directed): one chunk's `future_work`/`limitations` (a
+  stated need) sits close to another's `method`/`experiments`/`applications` (a
+  delivered capability) — *"someone wished for this; someone else built it."*
+  This uses the corpus's section types, a structural signal most systems
+  discard.
+- **cross-domain** (undirected): two chunks are close in meaning but their
+  papers share no arXiv category — the same idea echoing across fields, a
+  transfer-of-ideas opportunity.
+
+Connections live in `meta.db`'s `cortex_edges` table — **derived state**, like
+the index itself: `kb cortex rebuild` reconstructs it from the embeddings (no
+re-embedding, so it's cheap) and `kb reindex` rebuilds it as part of a full
+rebuild. Surface them with `kb spark` or the web app's **Sparks** view. Tune
+the thresholds under `[cortex]` in `config.toml` (`min_similarity`,
+`min_domain_distance`); see [CONFIG.md](./CONFIG.md). Turn the whole layer off
+with `[cortex] enabled = false`.
+
 ### Notes and tags
 
 ```bash
@@ -198,11 +242,17 @@ reindexes) and power `--tag` filters.
 ```bash
 kb list                      # all documents (--tag/--kind/--project to filter)
 kb show 2504.19874           # metadata, abstract, indexed sections, your notes
+kb similar 2504.19874        # documents nearest this one (-k/--limit N)
 kb open 2504.19874           # PDF in your default viewer
 kb open 2504.19874 --section method     # … at that section's page
 kb open 2504.19874_method_0  # … at a specific search hit's page
 kb stats                     # corpus totals, chunks per section type, top tags
 ```
+
+`kb similar` ranks the documents whose content sits closest to a given one in
+embedding space (the same signal behind the web app's **Related** panel and the
+graph's similarity edges). It reuses the embedding cache, so it costs no API
+calls unless the cache was cleared.
 
 ### Health and maintenance
 
@@ -245,21 +295,46 @@ startup (override with `KB_API_KEY`, rotate with `kb rotate-key`).
 | `GET /papers` | list documents (`?tag=`, `?category=`) |
 | `GET /papers/{id}` | metadata + notes + PDF path |
 | `POST /search` | semantic search (body: `query`, `mode`, `k`, filters) |
+| `GET /papers/{id}/similar` | documents most similar to this one (`?limit=`) |
+| `GET /graph` | the corpus as nodes + edges (`?neighbors=` similarity edges per node) |
+| `GET /sparks` | Cortex's surprising connections (`?kind=need_solution\|cross_domain`, `?limit=`) |
+| `POST /chat` | RAG answer over the corpus, with cited sources (body: `query`, optional `history`) |
 | `POST /papers/{id}/notes` | append a note and re-embed |
 | `GET /chunks/{id}` | full chunk text + deep link |
 | `GET /open/{id}` | 302 redirect to the PDF deep link |
 
 The web app needs no build step. Open the `http://127.0.0.1:4321/?key=…`
 link printed by `kb serve` — it seeds the key into your browser
-(`localStorage`) — and you get three views: **Papers** (filter by
-text/tag/category/kind; open any document's abstract, notes, and PDF
-deep-link), **Search** (narrow/wide semantic search with per-chunk
-scores and deep-links, cross-linking into the paper detail), and
-**Analytics** (document/chunk counts, chunks-per-section breakdown, and
-a tag cloud).
+(`localStorage`) — and you get six views:
 
-Planned for v0.2: `kb similar` (papers near this one) and `kb excerpt`
-(compile chosen sections into one PDF).
+- **Papers** — filter by text/tag/category/kind; open any document's
+  abstract, notes, and PDF deep-link. Each detail panel also shows a
+  **Related** list: the documents most similar to this one (by the mean of
+  its chunk embeddings), so you can wander the corpus by proximity.
+- **Search** — narrow/wide semantic search with per-chunk scores and
+  deep-links, cross-linking into the paper detail.
+- **Chat** — ask a question and get an answer synthesized over the corpus
+  (wide retrieval → the chat model), with every claim cited `[n]` back to the
+  source document and PDF page. Citations and the source list open the PDF
+  panel at the right page. Multi-turn: follow-ups keep the prior context.
+- **Graph** — the whole corpus as a force-directed graph: a node per
+  document (sized by indexed chunk count, colored by kind), edges from
+  explicit `[[id]]`/`--link`/`--scope` relations plus nearest-neighbor
+  *similarity* edges. Drag nodes, pan/zoom, filter edge types, highlight by
+  text, click a node to open the document.
+- **Sparks** — Cortex's surprising connections, most surprising first: a
+  per-connection card with both bridged passages, filterable by signal
+  (need→solution / cross-domain). Click either side to open the document.
+- **Analytics** — document/chunk counts, chunks-per-section breakdown, and a
+  tag cloud.
+
+**Chat** uses OpenAI chat-completions (so it shares the single
+`OPENAI_API_KEY` the embedding pipeline already needs); the model and context
+size are configurable under `[chat]` in `config.toml` (default
+`gpt-4o-mini`, 12 context chunks). **Related** and **Graph** similarity reuse
+the embedding cache, so they cost no API calls.
+
+Planned for v0.2: `kb excerpt` (compile chosen sections into one PDF).
 
 ## Claude Code integration
 

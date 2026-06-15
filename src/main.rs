@@ -129,8 +129,28 @@ enum Command {
     },
     /// Paper details: metadata + notes + sections summary
     Show { arxiv_id: String },
-    /// Papers semantically near this one (v0.2)
-    Similar { arxiv_id: String },
+    /// Surface the most surprising cross-document connections Cortex has formed
+    Spark {
+        /// Number of sparks to show (default: cortex.max_sparks)
+        #[arg(short = 'k', long = "limit", default_value_t = 0)]
+        limit: usize,
+        /// Restrict to one signal: need_solution, cross_domain, or all
+        #[arg(long)]
+        kind: Option<String>,
+    },
+    /// Cortex (associative layer) maintenance
+    Cortex {
+        #[command(subcommand)]
+        cmd: CortexCmd,
+    },
+    /// Documents semantically nearest this one (CLI twin of the web app's
+    /// "Related" panel)
+    Similar {
+        arxiv_id: String,
+        /// Number of results
+        #[arg(short = 'k', long = "limit", default_value_t = 10)]
+        limit: usize,
+    },
     /// Open the PDF in the default viewer, optionally at a section/chunk
     Open {
         /// arXiv id or chunk id (e.g. 2504.19874 or 2504.19874_method_0)
@@ -184,6 +204,12 @@ enum Command {
     },
     /// Generate a fresh HTTP API key, replacing the existing one
     RotateKey,
+}
+
+#[derive(Subcommand)]
+enum CortexCmd {
+    /// Recompute the whole associative layer from the embeddings (no re-embed)
+    Rebuild,
 }
 
 #[derive(Subcommand)]
@@ -312,7 +338,11 @@ async fn run(cli: Cli) -> Result<(), KbError> {
             commands::list(&kb, tag, kind.to_filter(), project)
         }
         Command::Show { arxiv_id } => commands::show(&kb, arxiv_id),
-        Command::Similar { arxiv_id } => commands::similar(&kb, arxiv_id).await,
+        Command::Spark { limit, kind } => commands::spark(&kb, limit, kind),
+        Command::Cortex { cmd } => match cmd {
+            CortexCmd::Rebuild => commands::cortex_rebuild(&kb),
+        },
+        Command::Similar { arxiv_id, limit } => commands::similar(&kb, arxiv_id, limit).await,
         Command::Open { target, section } => commands::open_target(&kb, target, section),
         Command::Excerpt { chunk_ids, out } => commands::excerpt(&kb, chunk_ids, out),
         Command::Stats => commands::stats(&kb),

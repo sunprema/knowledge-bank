@@ -318,13 +318,24 @@ async fn sync_paper(
         log_line(paths, &format!("detected change in {paper_id}, re-embedding"));
         let t0 = std::time::Instant::now();
         match index_paper_from_disk(paths, config, db, index, paper_id).await {
-            Ok((chunks, cache_hits)) => log_line(
-                paths,
-                &format!(
-                    "re-embedded {paper_id}: {chunks} chunks, {cache_hits} from cache ({:.1}s)",
-                    t0.elapsed().as_secs_f64()
-                ),
-            ),
+            Ok((chunks, cache_hits)) => {
+                log_line(
+                    paths,
+                    &format!(
+                        "re-embedded {paper_id}: {chunks} chunks, {cache_hits} from cache ({:.1}s)",
+                        t0.elapsed().as_secs_f64()
+                    ),
+                );
+                // Grow/refresh the associative layer for this paper (its chunk
+                // ids just changed). Best-effort — never let it crash the watcher.
+                match crate::cortex::connect_paper_with(paths, config, db, index, paper_id) {
+                    Ok(n) if n > 0 => {
+                        log_line(paths, &format!("cortex: {paper_id} formed {n} connections"))
+                    }
+                    Ok(_) => {}
+                    Err(e) => log_line(paths, &format!("cortex connect for {paper_id} failed: {e}")),
+                }
+            }
             Err(e) => log_line(paths, &format!("re-embed of {paper_id} failed: {e}")),
         }
     } else {

@@ -231,6 +231,7 @@ pub async fn ingest_url(
         config.turbovec.bit_width,
     )?;
     let (n_chunks, cache_hits) = index_paper_from_disk(paths, config, &db, &mut index, &id).await?;
+    connect_cortex(paths, config, &db, &index, &id);
     let meta = PaperMetadata::load(&paths.metadata_path(&id))?;
 
     let elapsed = t0.elapsed().as_secs_f64();
@@ -413,6 +414,7 @@ pub async fn ingest_idea(
         config.turbovec.bit_width,
     )?;
     let (n_chunks, cache_hits) = index_paper_from_disk(paths, config, &db, &mut index, &id).await?;
+    connect_cortex(paths, config, &db, &index, &id);
 
     let elapsed = t0.elapsed().as_secs_f64();
     log_line(
@@ -516,6 +518,7 @@ pub async fn ingest_reflection(
         config.turbovec.bit_width,
     )?;
     let (n_chunks, cache_hits) = index_paper_from_disk(paths, config, &db, &mut index, &id).await?;
+    connect_cortex(paths, config, &db, &index, &id);
 
     let elapsed = t0.elapsed().as_secs_f64();
     log_line(
@@ -576,12 +579,23 @@ async fn index_and_report(
     progress("classifying sections");
     let sections_md = std::fs::read_to_string(paths.sections_path(id)).ok();
     let notes_md = std::fs::read_to_string(paths.notes_path(id)).ok();
-    let chunks = sections::build_chunks(
+    let overrides = match sections_md.as_deref() {
+        Some(md) => {
+            let others = sections::other_headings(md);
+            if !others.is_empty() {
+                progress("classifying ambiguous headings (LLM)");
+            }
+            sections::llm_heading_overrides(config, &others).await
+        }
+        None => std::collections::HashMap::new(),
+    };
+    let chunks = sections::build_chunks_with_overrides(
         sections_md.as_deref(),
         &meta.abstract_text,
         notes_md.as_deref(),
         None,
         config.ingest.chunk_max_tokens,
+        &overrides,
     )?;
     let pages = assign_pages(&chunks, &toc);
 
@@ -596,6 +610,7 @@ async fn index_and_report(
         paths, config, &db, &mut index, id, &chunks, &pages, &toc, meta,
     )
     .await?;
+    connect_cortex(paths, config, &db, &index, id);
 
     let elapsed = t0.elapsed().as_secs_f64();
     log_line(
@@ -641,12 +656,17 @@ pub async fn index_paper_from_disk(
     };
     let notes_md = std::fs::read_to_string(paths.notes_path(paper_id)).ok();
 
-    let chunks = sections::build_chunks(
+    let overrides = match sections_md.as_deref() {
+        Some(md) => sections::llm_heading_overrides(config, &sections::other_headings(md)).await,
+        None => std::collections::HashMap::new(),
+    };
+    let chunks = sections::build_chunks_with_overrides(
         sections_md.as_deref(),
         &meta.abstract_text,
         notes_md.as_deref(),
         reflection_md.as_deref(),
         config.ingest.chunk_max_tokens,
+        &overrides,
     )?;
 
     // Pages come from a PDF outline; notes and reflections have none.
@@ -683,6 +703,9 @@ pub async fn reembed_notes(
         config.turbovec.bit_width,
     )?;
     index_paper_from_disk(paths, config, &db, &mut index, paper_id).await?;
+    // Re-embedding reassigns this paper's chunk ids, so its Cortex edges must
+    // be recomputed or they'd dangle.
+    connect_cortex(paths, config, &db, &index, paper_id);
     Ok(())
 }
 
@@ -760,6 +783,17 @@ pub async fn reindex_all(
     db.meta_set("vector_fingerprint", &config.vector_fingerprint())?;
     db.meta_set("chunking_fingerprint", &config.chunking_fingerprint())?;
     index.save_atomic(&index_path)?;
+
+    // Rebuild the Cortex layer over the freshly indexed corpus (every paper is
+    // present now, so cross-paper edges are complete). Derived state, like the
+    // index itself — best-effort so a connect hiccup never fails the reindex.
+    match crate::cortex::rebuild_all_with(paths, config, &db, &index) {
+        Ok(n) => log_line(paths, &format!("cortex: rebuilt {n} connections")),
+        Err(e) => {
+            eprintln!("warning: cortex rebuild failed: {e}");
+            log_line(paths, &format!("cortex rebuild failed: {e}"));
+        }
+    }
 
     if backup.exists() {
         let _ = std::fs::remove_file(&backup);
@@ -911,6 +945,28 @@ pub fn ensure_notes_template(paths: &KbPaths, paper_id: &str, title: &str) -> Re
          <!-- Connections to other things I've saved -->\n\n\n"
     );
     std::fs::write(&path, body).map_err(|e| io_err("write notes.md", e))
+}
+
+/// (Re)establish a paper's Cortex connections after it has been (re)indexed.
+/// Best-effort: the paper is already committed to both stores, so a failure to
+/// grow the associative layer must never fail the ingest — it's logged and the
+/// next `kb cortex rebuild` / `kb reindex` will catch up. No-op when Cortex is
+/// disabled (the call returns 0 immediately).
+fn connect_cortex(
+    paths: &KbPaths,
+    config: &Config,
+    db: &MetaDb,
+    index: &VectorIndex,
+    paper_id: &str,
+) {
+    match crate::cortex::connect_paper_with(paths, config, db, index, paper_id) {
+        Ok(n) if n > 0 => log_line(paths, &format!("cortex: {paper_id} formed {n} connections")),
+        Ok(_) => {}
+        Err(e) => {
+            tracing::warn!("cortex connect for {paper_id} failed: {e}");
+            log_line(paths, &format!("cortex connect for {paper_id} failed: {e}"));
+        }
+    }
 }
 
 /// Append one timestamped line to .arxiv-kb/kb.log (PRD §9 format).

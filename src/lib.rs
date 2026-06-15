@@ -5,8 +5,10 @@
 //! turbovec index and meta.db are derived artifacts, rebuildable at any time
 //! via `kb reindex`.
 
+pub mod chat;
 pub mod commands;
 pub mod config;
+pub mod cortex;
 pub mod embed;
 pub mod error;
 pub mod index;

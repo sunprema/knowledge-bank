@@ -663,9 +663,46 @@ pub fn show(kb: &Kb, arxiv_id: String) -> Result<(), KbError> {
     Ok(())
 }
 
-pub async fn similar(kb: &Kb, arxiv_id: String) -> Result<(), KbError> {
-    let _ = (kb, arxiv_id);
-    Err(planned("similar", "v0.2"))
+/// Documents most similar to `arxiv_id` — the CLI twin of the web app's
+/// "Related" panel. Uses the paper's cached centroid (no API calls unless the
+/// embedding cache was cleared, in which case it re-embeds title+abstract).
+pub async fn similar(kb: &Kb, arxiv_id: String, limit: usize) -> Result<(), KbError> {
+    let id = canonical_id(&arxiv_id)?;
+    require_paper(kb, &id)?; // friendly NotFound before we touch the stores
+    let resp = retrieval::similar_papers(&kb.paths, &kb.config, &id, limit.max(1)).await?;
+
+    match kb.format {
+        OutputFormat::Json => {
+            println!("{}", serde_json::to_string_pretty(&resp).unwrap());
+        }
+        OutputFormat::Pretty => {
+            if resp.papers.is_empty() {
+                println!("no documents similar to {id}");
+                println!("(is the corpus indexed? check `kb status`, then `kb reindex`)");
+                return Ok(());
+            }
+            println!("documents similar to {id}:");
+            for (i, p) in resp.papers.iter().enumerate() {
+                let marker = match p.kind.as_str() {
+                    "note" => "  (idea)",
+                    "reflection" => "  (reflection)",
+                    _ => "",
+                };
+                println!(
+                    "{:>2}. [{:.3}] {}  ({}){}",
+                    i + 1,
+                    p.score,
+                    p.title,
+                    p.paper_id,
+                    marker
+                );
+                if !p.tags.is_empty() {
+                    println!("      tags: {}", p.tags.join(", "));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 pub fn open_target(kb: &Kb, target: String, section: Option<String>) -> Result<(), KbError> {
@@ -963,6 +1000,69 @@ pub fn rotate_key(kb: &Kb) -> Result<(), KbError> {
         OutputFormat::Pretty => {
             println!("new API key: {key}");
             println!("clients must now send  X-KB-Key: {key}");
+        }
+    }
+    Ok(())
+}
+
+/// `kb spark` — surface the most surprising connections Cortex has formed
+/// across the corpus (the associative layer, not relevance search). `kind`
+/// optionally narrows to `need_solution` or `cross_domain`.
+pub fn spark(kb: &Kb, limit: usize, kind: Option<String>) -> Result<(), KbError> {
+    let kind_filter = crate::cortex::parse_kind_filter(kind.as_deref())?;
+    let sparks = crate::cortex::list_sparks(&kb.paths, &kb.config, limit, kind_filter)?;
+
+    match kb.format {
+        OutputFormat::Json => {
+            println!("{}", serde_json::to_string_pretty(&sparks).unwrap());
+        }
+        OutputFormat::Pretty => {
+            if sparks.is_empty() {
+                println!("no sparks yet");
+                if !kb.config.cortex.enabled {
+                    println!("(cortex is disabled — set [cortex] enabled = true, then `kb cortex rebuild`)");
+                } else {
+                    println!("(add a few more documents, or run `kb cortex rebuild` to scan the corpus)");
+                }
+                return Ok(());
+            }
+            for (i, s) in sparks.iter().enumerate() {
+                let (badge, arrow) = match s.kind.as_str() {
+                    "need_solution" => ("need→solution", "⇒"),
+                    "cross_domain" => ("cross-domain", "↔"),
+                    other => (other, "↔"),
+                };
+                println!("{:>2}. [{:.3}] {}", i + 1, s.surprise, badge);
+                println!("    {} ({})", s.src.title, s.src.section_type);
+                println!("      {}", s.src.snippet);
+                println!("    {arrow}");
+                println!("    {} ({})", s.dst.title, s.dst.section_type);
+                println!("      {}", s.dst.snippet);
+                println!("    {}  {arrow}  {}", s.src.chunk_id, s.dst.chunk_id);
+                println!();
+            }
+            println!("{} sparks", sparks.len());
+        }
+    }
+    Ok(())
+}
+
+/// `kb cortex rebuild` — recompute the whole associative layer from the
+/// embeddings (no re-embedding, so it's cheap). Use after enabling Cortex on an
+/// existing corpus or after tuning the `[cortex]` thresholds.
+pub fn cortex_rebuild(kb: &Kb) -> Result<(), KbError> {
+    let t0 = std::time::Instant::now();
+    let n = crate::cortex::rebuild_all(&kb.paths, &kb.config)?;
+    match kb.format {
+        OutputFormat::Json => {
+            println!("{}", serde_json::to_string_pretty(&json!({ "connections": n })).unwrap());
+        }
+        OutputFormat::Pretty => {
+            if !kb.config.cortex.enabled {
+                println!("cortex is disabled ([cortex] enabled = false); cleared the edge store");
+            } else {
+                println!("cortex: {n} connections in {:.1}s", t0.elapsed().as_secs_f64());
+            }
         }
     }
     Ok(())

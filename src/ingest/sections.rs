@@ -1,7 +1,10 @@
 //! Section classification and chunking (PRD §4 step 6) — the single
 //! trickiest part of the pipeline.
 
+use crate::chat::{ChatMessage, OpenAiChat};
+use crate::config::Config;
 use crate::{KbError, RawChunk, SectionType, TocEntry, approx_tokens};
+use std::collections::{HashMap, HashSet};
 
 /// Deterministic heading classifier (PRD §4 step 6, locked decision:
 /// ambiguous ⇒ `Other`, no ML). Match is case-insensitive `contains`,
@@ -47,6 +50,216 @@ pub fn classify_heading(heading: &str) -> SectionType {
     }
 }
 
+/// LaTeX command tokens pandoc sometimes leaves as bare words in the body
+/// (e.g. a mangled `\maketitle\thanks{}` → "maketitle thanks aketitle"). A line
+/// is dropped only when *every* token is one of these (or a `\begin{}`/`\end{}`
+/// environment marker), so ordinary prose containing one such word survives.
+const LATEX_NOISE: &[&str] = &[
+    "maketitle", "thanks", "aketitle", "centering", "noindent", "par", "clearpage", "newpage",
+    "vspace", "hspace", "bibliographystyle", "bibliography", "footnotesize", "small", "normalsize",
+    "bigskip", "medskip", "smallskip", "hfill", "vfill", "tableofcontents", "appendix",
+];
+
+/// Strip extraction boilerplate from a paper body before chunking — LaTeX
+/// preamble leftovers and figure/markup artifacts that pandoc/PDF conversion
+/// leaves behind. They carry no retrievable meaning yet get embedded, polluting
+/// search and surfacing as spurious matches (e.g. two `\maketitle` fragments
+/// matching each other). Conservative and idempotent: it removes only
+/// well-known noise, never ordinary prose, and leaves fenced code blocks
+/// untouched. Applied to `sections.md` bodies only — the API abstract, notes,
+/// and reflections are already clean.
+pub fn clean_extracted_markdown(md: &str) -> String {
+    // 1. ACM CCS concept blocks: `<div class="CCSXML"> … </div>`. The inner XML
+    //    is escaped, so there is no real nested <div> to confuse the match.
+    let without_ccs = remove_block(md, "<div class=\"CCSXML\">", "</div>");
+
+    // 2. Line-level cleanup, preserving fenced code verbatim.
+    let mut out = String::with_capacity(without_ccs.len());
+    let mut blank_run = 1; // suppress leading blank lines
+    let mut in_fence = false;
+    for line in without_ccs.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            in_fence = !in_fence;
+            blank_run = 0;
+            out.push_str(line);
+            out.push('\n');
+            continue;
+        }
+        if in_fence {
+            out.push_str(line);
+            out.push('\n');
+            continue;
+        }
+        let drop = is_markup_only(line) || is_latex_preamble_noise(line);
+        if drop || line.trim().is_empty() {
+            if blank_run == 0 {
+                out.push('\n'); // collapse a run of blanks to one
+            }
+            blank_run += 1;
+            continue;
+        }
+        blank_run = 0;
+        out.push_str(line.trim_end());
+        out.push('\n');
+    }
+    out
+}
+
+/// Remove every `open … close` span from `s` (non-nesting). An unterminated
+/// `open` drops the remainder.
+fn remove_block(s: &str, open: &str, close: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(i) = rest.find(open) {
+        out.push_str(&rest[..i]);
+        let after = &rest[i + open.len()..];
+        match after.find(close) {
+            Some(j) => rest = &after[j + close.len()..],
+            None => return out,
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Drop text between `<` and `>` (HTML/markup tags). Used to decide whether a
+/// line is *only* markup.
+fn strip_angle_spans(s: &str) -> String {
+    let mut out = String::new();
+    let mut depth = 0u32;
+    for c in s.chars() {
+        match c {
+            '<' => depth += 1,
+            '>' if depth > 0 => depth -= 1,
+            _ if depth == 0 => out.push(c),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// A line that is nothing but HTML tags — `<embed …/>`, `<img …>`,
+/// `<span …></span>`, `<div …>`, `</div>`, `<figure>` … — carries no text to
+/// embed. (Lines mixing tags with real text are left untouched.)
+fn is_markup_only(line: &str) -> bool {
+    let t = line.trim();
+    t.starts_with('<') && strip_angle_spans(t).trim().is_empty()
+}
+
+/// True when every whitespace token on the line is a LaTeX-noise command (see
+/// [`LATEX_NOISE`]) or a `\begin{}`/`\end{}` marker.
+fn is_latex_preamble_noise(line: &str) -> bool {
+    let toks: Vec<&str> = line.split_whitespace().collect();
+    if toks.is_empty() {
+        return false;
+    }
+    toks.iter().all(|tok| {
+        let w = tok.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '{');
+        w.starts_with("begin{") || w.starts_with("end{") || LATEX_NOISE.contains(&w)
+    })
+}
+
+/// Distinct headings in `md` whose *deterministic* classification is `Other` —
+/// the candidates an LLM fallback ([`llm_heading_overrides`]) tries to rescue.
+pub fn other_headings(md: &str) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for (heading, _) in split_at_headings(md) {
+        if let Some(h) = heading
+            && classify_heading(&h) == SectionType::Other
+            && seen.insert(h.clone())
+        {
+            out.push(h);
+        }
+    }
+    out
+}
+
+/// Section types the LLM fallback is allowed to assign. Excludes `abstract`
+/// (the API copy always wins), the synthetic `user_notes`/`reflection`, and
+/// `other` itself (the default it's trying to improve on).
+const LLM_TARGETS: [SectionType; 8] = [
+    SectionType::Introduction,
+    SectionType::Background,
+    SectionType::Method,
+    SectionType::Experiments,
+    SectionType::Applications,
+    SectionType::Limitations,
+    SectionType::FutureWork,
+    SectionType::Conclusion,
+];
+
+/// LLM fallback classifier (PRD §16: sanctioned once the Other ratio exceeds
+/// ~25%). Given the headings the deterministic classifier punted to `Other`,
+/// ask the chat model to map each to a real section type in ONE batched call,
+/// and return only the confident, in-vocabulary results. Best-effort: disabled
+/// by config, an empty input, a missing key, or any API/parse error all yield
+/// an empty map, leaving those headings as `Other`.
+pub async fn llm_heading_overrides(
+    config: &Config,
+    headings: &[String],
+) -> HashMap<String, SectionType> {
+    if !config.ingest.classify_with_llm || headings.is_empty() {
+        return HashMap::new();
+    }
+    match try_llm_overrides(config, headings).await {
+        Ok(map) => map,
+        Err(e) => {
+            tracing::warn!("LLM heading classification failed ({e}); keeping deterministic 'other'");
+            HashMap::new()
+        }
+    }
+}
+
+async fn try_llm_overrides(
+    config: &Config,
+    headings: &[String],
+) -> Result<HashMap<String, SectionType>, KbError> {
+    let client = OpenAiChat::from_env(&config.chat.model)?;
+    let allowed = LLM_TARGETS.map(|t| t.as_str()).join(", ");
+    let system = format!(
+        "You label academic-paper section headings. For each heading, choose the single best \
+         category from: {allowed}. Use \"other\" only if none fits (e.g. acknowledgments, \
+         references, appendix, notation, ethics statement). Reply with ONLY a JSON object mapping \
+         each input heading string (verbatim) to its category. No prose, no code fences."
+    );
+    let user = format!(
+        "Headings:\n{}",
+        serde_json::to_string(headings).unwrap_or_default()
+    );
+    let reply = client
+        .complete(
+            &[ChatMessage::system(system), ChatMessage::user(user)],
+            0.0,
+        )
+        .await?;
+
+    let json = extract_json_object(&reply)
+        .ok_or_else(|| KbError::Network("classifier reply was not a JSON object".into()))?;
+    let raw: HashMap<String, String> = serde_json::from_str(json)
+        .map_err(|e| KbError::Network(format!("malformed classifier JSON: {e}")))?;
+
+    let mut out = HashMap::new();
+    for h in headings {
+        if let Some(cat) = raw.get(h)
+            && let Some(ty) = SectionType::parse(&cat.to_lowercase())
+            && LLM_TARGETS.contains(&ty)
+        {
+            out.insert(h.clone(), ty);
+        }
+    }
+    Ok(out)
+}
+
+/// Slice out the first `{ … }` object from a model reply (tolerates stray prose
+/// or ```json fences around it).
+fn extract_json_object(reply: &str) -> Option<&str> {
+    let start = reply.find('{')?;
+    let end = reply.rfind('}')?;
+    (end > start).then(|| &reply[start..=end])
+}
+
 /// Strip HTML comments (`<!-- … -->`, including multi-line) from markdown.
 /// Locked decision: the notes.md template prompts live in HTML comments and
 /// must never be embedded. An unterminated comment runs to end of input
@@ -87,6 +300,10 @@ pub fn strip_html_comments(md: &str) -> String {
 ///
 /// Ordinals are 0-based per section type, so ids look like
 /// `2504.19874_method_0`, `2504.19874_method_1`.
+///
+/// Deterministic-only entry point (the LLM fallback contributes no overrides);
+/// used by tests and any caller without a [`Config`]/network. Production ingest
+/// goes through [`build_chunks_with_overrides`].
 pub fn build_chunks(
     sections_md: Option<&str>,
     abstract_text: &str,
@@ -94,17 +311,46 @@ pub fn build_chunks(
     reflection_md: Option<&str>,
     chunk_max_tokens: usize,
 ) -> Result<Vec<RawChunk>, KbError> {
+    build_chunks_with_overrides(
+        sections_md,
+        abstract_text,
+        notes_md,
+        reflection_md,
+        chunk_max_tokens,
+        &HashMap::new(),
+    )
+}
+
+/// As [`build_chunks`], but `overrides` (heading → section type, from
+/// [`llm_heading_overrides`]) re-labels headings the deterministic classifier
+/// put in `Other`. The paper body is first run through
+/// [`clean_extracted_markdown`] to drop extraction boilerplate. The deterministic
+/// keyword path is unchanged; overrides only ever upgrade an `Other`.
+pub fn build_chunks_with_overrides(
+    sections_md: Option<&str>,
+    abstract_text: &str,
+    notes_md: Option<&str>,
+    reflection_md: Option<&str>,
+    chunk_max_tokens: usize,
+    overrides: &HashMap<String, SectionType>,
+) -> Result<Vec<RawChunk>, KbError> {
     let mut builder = ChunkBuilder::new(chunk_max_tokens);
 
     // The abstract always comes from the API copy.
     builder.add_section(SectionType::Abstract, None, abstract_text);
 
     if let Some(md) = sections_md {
-        for (heading, body) in split_at_headings(md) {
+        let cleaned = clean_extracted_markdown(md);
+        for (heading, body) in split_at_headings(&cleaned) {
             match &heading {
                 None => builder.add_section(SectionType::Other, None, &body),
                 Some(h) => {
-                    let ty = classify_heading(h);
+                    let mut ty = classify_heading(h);
+                    if ty == SectionType::Other
+                        && let Some(&forced) = overrides.get(h)
+                    {
+                        ty = forced;
+                    }
                     if ty == SectionType::Abstract {
                         continue; // API abstract wins over pandoc's
                     }
@@ -393,6 +639,77 @@ mod tests {
         for h in ["Acknowledgments", "References", "Appendix A", "Notation", "Ethics Statement"] {
             assert_eq!(classify_heading(h), SectionType::Other, "{h}");
         }
+    }
+
+    // -------- clean_extracted_markdown --------
+
+    #[test]
+    fn clean_removes_ccsxml_block() {
+        let md = "# Intro\n\n<div class=\"CCSXML\">\n\\<ccs2012\\> \\<concept\\> junk \\</concept\\>\n</div>\n\nReal text.\n";
+        let out = clean_extracted_markdown(md);
+        assert!(!out.contains("CCSXML"));
+        assert!(!out.contains("ccs2012"));
+        assert!(out.contains("# Intro"));
+        assert!(out.contains("Real text."));
+    }
+
+    #[test]
+    fn clean_drops_markup_only_lines_but_keeps_mixed() {
+        let md = "<embed src=\"figures/teaser.pdf\" />\n<span id=\"fig:t\" data-label=\"fig:t\"></span>\nThe success rate <span>x</span> improved.\n";
+        let out = clean_extracted_markdown(md);
+        assert!(!out.contains("<embed"));
+        assert!(!out.contains("data-label"));
+        // A line mixing tags with real prose is preserved verbatim.
+        assert!(out.contains("The success rate <span>x</span> improved."));
+    }
+
+    #[test]
+    fn clean_drops_latex_preamble_noise() {
+        let md = "maketitle thanks aketitle\n\nGenerative agents simulate behavior.\n\n\\begin{figure}\n";
+        let out = clean_extracted_markdown(md);
+        assert!(!out.contains("maketitle"));
+        assert!(!out.contains("begin{figure}"));
+        assert!(out.contains("Generative agents simulate behavior."));
+    }
+
+    #[test]
+    fn clean_preserves_code_fences_and_is_idempotent() {
+        let md = "# Method\n\n```html\n<div>kept as code</div>\nmaketitle\n```\n\nProse.\n";
+        let once = clean_extracted_markdown(md);
+        assert!(once.contains("<div>kept as code</div>"), "fenced markup must survive");
+        assert!(once.contains("maketitle"), "fenced latex word must survive");
+        assert_eq!(clean_extracted_markdown(&once), once, "cleaning is idempotent");
+    }
+
+    // -------- other_headings + overrides --------
+
+    #[test]
+    fn other_headings_lists_only_unclassified_distinct() {
+        let md = "# Introduction\n\nx\n\n# Generative Agent Architecture\n\ny\n\n## Memory and Retrieval\n\nz\n\n# Generative Agent Architecture\n\ndup\n";
+        let others = other_headings(md);
+        assert_eq!(others, vec!["Generative Agent Architecture".to_string(), "Memory and Retrieval".to_string()]);
+        assert!(!others.iter().any(|h| h == "Introduction"), "classified headings excluded");
+    }
+
+    #[test]
+    fn overrides_upgrade_other_headings_only() {
+        let md = "# Generative Agent Architecture\n\nThe architecture has memory.\n\n# Introduction\n\nIntro.\n";
+        let mut ov = HashMap::new();
+        ov.insert("Generative Agent Architecture".to_string(), SectionType::Method);
+        // An override for an already-classified heading must NOT override it.
+        ov.insert("Introduction".to_string(), SectionType::Method);
+        let chunks = build_chunks_with_overrides(Some(md), "Abs.", None, None, 2000, &ov).unwrap();
+        let arch = chunks.iter().find(|c| c.heading.as_deref() == Some("Generative Agent Architecture")).unwrap();
+        assert_eq!(arch.section_type, SectionType::Method, "Other heading upgraded");
+        let intro = chunks.iter().find(|c| c.heading.as_deref() == Some("Introduction")).unwrap();
+        assert_eq!(intro.section_type, SectionType::Introduction, "deterministic result not overridden");
+    }
+
+    #[test]
+    fn extract_json_object_tolerates_fences_and_prose() {
+        assert_eq!(extract_json_object("```json\n{\"a\":\"b\"}\n```"), Some("{\"a\":\"b\"}"));
+        assert_eq!(extract_json_object("here: {\"x\":1} done"), Some("{\"x\":1}"));
+        assert_eq!(extract_json_object("no object"), None);
     }
 
     // -------- strip_html_comments --------

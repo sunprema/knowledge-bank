@@ -269,11 +269,16 @@ fn v02_commands_say_so() {
         .assert()
         .code(1)
         .stderr(predicate::str::contains("planned for v0.2"));
+}
+
+#[test]
+fn similar_unknown_paper_exits_2() {
+    let dir = tempfile::tempdir().unwrap();
     kb(dir.path())
         .args(["similar", "2504.19874"])
         .assert()
-        .code(1)
-        .stderr(predicate::str::contains("planned for v0.2"));
+        .code(2)
+        .stderr(predicate::str::contains("not in the KB"));
 }
 
 #[test]
