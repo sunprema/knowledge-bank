@@ -3,13 +3,49 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
 <title>Knowledge Bank</title>
 <style>
+  /* Dark is the default theme; the light overrides below kick in when the
+     OS reports a light appearance (prefers-color-scheme). Every colour the
+     UI uses is a token here so the two themes stay in sync. */
   :root{
     --bg:#04070d; --panel:rgba(10,20,30,.7); --panel2:rgba(7,13,21,.82);
     --line:rgba(127,233,255,.14); --line2:rgba(127,233,255,.08);
     --accent:#7fe9ff; --accent-dim:#5f7b97;
     --text:#dfe9f5; --muted:#8fa3ba; --faint:#5c708a;
+    --on-accent:#04070d;                       /* text on accent-filled surfaces */
+    --accent-glow:rgba(127,233,255,.06);        /* subtle accent tint (selected/hover) */
+    --accent-glow2:rgba(127,233,255,.08);
+    --green:#79e0a9; --green-line:rgba(121,224,169,.3);
+    --reflection:#cfe0f0; --reflection-line:rgba(207,224,240,.3);
+    --note-text:#cfe0f0;                        /* body text inside dark sub-panels */
+    --err:#ff9b9b;
+    --grad:linear-gradient(90deg,#2a7fa8,#7fe9ff);
+    --iframe-bg:#1a1f26;
+    --overlay:rgba(0,0,0,.6); --shadow:rgba(0,0,0,.5);
+    --page-glow:radial-gradient(1200px 600px at 70% -10%, rgba(127,233,255,.06), transparent 60%);
+    --c-paper:#7fe9ff; --c-note:#79e0a9; --c-reflection:#cfe0f0;  /* graph node fills */
+  }
+  @media (prefers-color-scheme: light){
+    :root{
+      --bg:#eef2f7; --panel:rgba(255,255,255,.78); --panel2:rgba(255,255,255,.9);
+      --line:rgba(20,60,90,.16); --line2:rgba(20,60,90,.08);
+      --accent:#0b7ea8; --accent-dim:#4a6a86;
+      --text:#16242f; --muted:#51637a; --faint:#7d90a6;
+      --on-accent:#ffffff;
+      --accent-glow:rgba(11,126,168,.08);
+      --accent-glow2:rgba(11,126,168,.12);
+      --green:#178a55; --green-line:rgba(23,138,85,.35);
+      --reflection:#4a5f86; --reflection-line:rgba(74,95,134,.3);
+      --note-text:#27384a;
+      --err:#c0392b;
+      --grad:linear-gradient(90deg,#2a7fa8,#0b7ea8);
+      --iframe-bg:#e9edf2;
+      --overlay:rgba(20,35,55,.35); --shadow:rgba(30,50,80,.22);
+      --page-glow:radial-gradient(1200px 600px at 70% -10%, rgba(11,126,168,.06), transparent 60%);
+      --c-paper:#0b7ea8; --c-note:#178a55; --c-reflection:#6378a0;
+    }
   }
   *{box-sizing:border-box}
   html,body{margin:0;height:100%}
@@ -17,7 +53,7 @@
     background:var(--bg); color:var(--text);
     font-family:-apple-system,"SF Pro Display","Segoe UI",Helvetica,Arial,sans-serif;
     font-size:14px; line-height:1.5;
-    background-image:radial-gradient(1200px 600px at 70% -10%, rgba(127,233,255,.06), transparent 60%);
+    background-image:var(--page-glow);
   }
   a{color:var(--accent);text-decoration:none}
   a:hover{text-decoration:underline}
@@ -34,7 +70,7 @@
     background:transparent;border:1px solid transparent;border-radius:8px;
     padding:7px 14px;color:var(--muted);
   }
-  nav button.active{color:var(--bg);background:var(--accent);font-weight:600}
+  nav button.active{color:var(--on-accent);background:var(--accent);font-weight:600}
   nav button:not(.active):hover{color:var(--text);border-color:var(--line)}
   .spacer{flex:1}
   .keybtn{
@@ -42,8 +78,8 @@
     padding:6px 12px;color:var(--muted);font-size:13px;
   }
   .keybtn:hover{border-color:var(--accent);color:var(--text)}
-  .keybtn .ok{color:#79e0a9}
-  .keybtn .no{color:#ff9b9b}
+  .keybtn .ok{color:var(--green)}
+  .keybtn .no{color:var(--err)}
   main{padding:22px;max-width:1300px;margin:0 auto}
 
   /* ---- papers ---- */
@@ -64,7 +100,7 @@
     padding:12px 14px;cursor:pointer;transition:border-color .12s,transform .12s;
   }
   .card:hover{border-color:var(--line)}
-  .card.sel{border-color:var(--accent);background:rgba(127,233,255,.06)}
+  .card.sel{border-color:var(--accent);background:var(--accent-glow)}
   .card .t{font-weight:600;color:var(--text);margin-bottom:3px}
   .card .a{color:var(--muted);font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .card .meta{display:flex;gap:8px;flex-wrap:wrap;margin-top:7px;align-items:center}
@@ -72,8 +108,8 @@
     font-size:11px;padding:2px 8px;border-radius:20px;border:1px solid var(--line);
     color:var(--accent-dim);
   }
-  .badge.kind-note{color:#79e0a9;border-color:rgba(121,224,169,.3)}
-  .badge.kind-reflection{color:#cfe0f0;border-color:rgba(207,224,240,.3)}
+  .badge.kind-note{color:var(--green);border-color:var(--green-line)}
+  .badge.kind-reflection{color:var(--reflection);border-color:var(--reflection-line)}
   .tag{font-size:11px;color:var(--faint);padding:2px 7px;border-radius:6px;background:var(--line2)}
 
   .detail{
@@ -89,13 +125,13 @@
   .detail .abs{color:var(--text);opacity:.92}
   .detail .notes{
     background:var(--panel2);border:1px solid var(--line2);border-radius:8px;
-    padding:14px 16px;white-space:pre-wrap;word-break:break-word;color:#cfe0f0;font-size:13px;
+    padding:14px 16px;white-space:pre-wrap;word-break:break-word;color:var(--note-text);font-size:13px;
   }
   .detail .kv{display:grid;grid-template-columns:120px 1fr;gap:6px 14px;color:var(--muted);font-size:13px}
   .detail .kv b{color:var(--faint);font-weight:500}
   .pdfbtn{
-    display:inline-block;margin-top:6px;background:linear-gradient(90deg,#2a7fa8,#7fe9ff);
-    color:#04070d;font-weight:600;border-radius:8px;padding:8px 16px;
+    display:inline-block;margin-top:6px;background:var(--grad);
+    color:var(--on-accent);font-weight:600;border-radius:8px;padding:8px 16px;
   }
   .pdfbtn:hover{text-decoration:none;filter:brightness(1.08)}
 
@@ -107,7 +143,7 @@
     transform:translateX(100%);transition:transform .2s ease;
     z-index:15;display:flex;flex-direction:column;
   }
-  .pdfpanel.open{transform:none;box-shadow:-20px 0 60px rgba(0,0,0,.5)}
+  .pdfpanel.open{transform:none;box-shadow:-20px 0 60px var(--shadow)}
   body.pdfopen main{margin:0 var(--pdfw) 0 0;max-width:none}
   /* reading mode: with the PDF open, the left side is a compact nav column —
      just the list (papers view), and clicking a card loads its PDF. */
@@ -118,14 +154,14 @@
   body.resizing .pdfpanel{transition:none}
   body.resizing .pdfpanel iframe{pointer-events:none}  /* keep drag events off the PDF */
   .pdfpanel .grip{position:absolute;left:-3px;top:0;width:7px;height:100%;cursor:col-resize;z-index:16}
-  .pdfpanel .grip:hover{background:linear-gradient(90deg,rgba(127,233,255,.35),transparent)}
+  .pdfpanel .grip:hover{background:linear-gradient(90deg,color-mix(in srgb,var(--accent) 35%,transparent),transparent)}
   .pdfpanel .bar{display:flex;align-items:center;gap:8px;padding:10px 12px 10px 16px;border-bottom:1px solid var(--line)}
   .pdfpanel .bar .ttl{flex:1;font-size:13px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .pdfpanel .bar a{color:var(--muted);border:1px solid var(--line);border-radius:7px;padding:5px 10px;font-size:12.5px}
   .pdfpanel .bar a:hover{color:var(--text);border-color:var(--accent);text-decoration:none}
   .pdfpanel .bar .x{background:transparent;border:none;color:var(--muted);font-size:17px;padding:2px 8px;border-radius:7px}
   .pdfpanel .bar .x:hover{color:var(--text);background:var(--line2)}
-  .pdfpanel iframe{flex:1;border:0;width:100%;background:#1a1f26}
+  .pdfpanel iframe{flex:1;border:0;width:100%;background:var(--iframe-bg)}
   @media(max-width:880px){
     .pdfpanel{width:100vw}
     body.pdfopen main{margin-right:0}
@@ -142,14 +178,14 @@
   .bar{display:grid;grid-template-columns:130px 1fr 48px;align-items:center;gap:12px;margin-bottom:9px}
   .bar .name{color:var(--muted);font-size:13px;text-align:right}
   .bar .track{background:var(--line2);border-radius:6px;height:14px;overflow:hidden}
-  .bar .fill{height:100%;background:linear-gradient(90deg,#2a7fa8,#7fe9ff);border-radius:6px}
+  .bar .fill{height:100%;background:var(--grad);border-radius:6px}
   .bar .v{color:var(--faint);font-size:12.5px}
   .cloud{display:flex;flex-wrap:wrap;gap:9px;align-items:baseline}
   .cloud .ctag{color:var(--text);border:1px solid var(--line);border-radius:20px;padding:4px 12px}
   .cloud .ctag b{color:var(--accent);margin-left:6px;font-weight:600}
 
   /* ---- search ---- */
-  .searchbtn{background:var(--accent);color:#04070d;border:none;border-radius:8px;padding:8px 18px;font-weight:600}
+  .searchbtn{background:var(--accent);color:var(--on-accent);border:none;border-radius:8px;padding:8px 18px;font-weight:600}
   .searchbtn:hover{filter:brightness(1.08)}
   .rgroup{background:var(--panel);border:1px solid var(--line2);border-radius:12px;padding:16px 18px;margin-bottom:14px}
   .rhead{display:flex;align-items:center;gap:10px;cursor:pointer;flex-wrap:wrap;text-decoration:none;color:inherit}
@@ -160,17 +196,17 @@
   .hit{display:block;border-top:1px solid var(--line2);padding:10px 8px;margin:0 -8px;border-radius:8px}
   .hit:first-of-type{border-top:none}
   a.hit{color:inherit;text-decoration:none;cursor:pointer}
-  a.hit:hover{background:rgba(127,233,255,.06)}
+  a.hit:hover{background:var(--accent-glow)}
   a.hit:hover .open{color:var(--accent)}
   .hitmeta{display:flex;align-items:center;gap:10px;margin-bottom:4px;font-size:12px}
   .score{color:var(--accent);font-weight:600}
   .sect{color:var(--accent-dim);text-transform:uppercase;letter-spacing:.4px;font-size:11px}
   .pg{color:var(--faint)}
   .open{margin-left:auto;font-size:12px;color:var(--accent-dim)}
-  .snip{color:#cfe0f0;font-size:13px}
+  .snip{color:var(--note-text);font-size:13px}
 
   .msg{color:var(--faint);padding:40px 0;text-align:center}
-  .err{color:#ff9b9b}
+  .err{color:var(--err)}
 
   /* ---- related / similar (in paper detail) ---- */
   .rel{display:flex;flex-direction:column;gap:6px}
@@ -187,17 +223,12 @@
   .gctl input[type=checkbox]{accent-color:var(--accent)}
   .glegend{display:flex;gap:14px;align-items:center;color:var(--faint);font-size:12px;margin-left:8px}
   .glegend i{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:5px;vertical-align:-1px}
+  /* the graph view drops the centered-column cap and uses the whole width */
+  body.graphview main{max-width:none}
   .graphwrap{position:relative;background:var(--panel);border:1px solid var(--line2);border-radius:12px;
-    height:calc(100vh - 210px);overflow:hidden}
-  #graph{width:100%;height:100%;display:block;cursor:grab}
-  #graph.panning{cursor:grabbing}
-  .gedge{stroke:var(--accent-dim);stroke-opacity:.28}
-  .gedge.ge-similar{stroke-dasharray:3 3;stroke-opacity:.18}
-  .gedge.hot{stroke:var(--accent);stroke-opacity:.9}
-  .gnode{cursor:pointer}
-  .gnode .glabel{fill:var(--muted);font-size:10px;pointer-events:none}
-  .gnode.match circle{stroke:var(--accent);stroke-width:2.5px}
-  .gnode.match .glabel{fill:var(--text)}
+    height:calc(100vh - 168px);overflow:hidden}
+  #graph{width:100%;height:100%;display:block;cursor:grab;touch-action:none}
+  #graph.grabbing{cursor:grabbing}
   .ginfo{position:absolute;left:14px;bottom:14px;max-width:60%;background:var(--panel2);
     border:1px solid var(--line);border-radius:9px;padding:10px 13px;font-size:13px;display:none;pointer-events:none}
   .ginfo .gsub{color:var(--faint);font-size:12px}
@@ -206,7 +237,7 @@
   .chatwrap{display:flex;flex-direction:column;height:calc(100vh - 150px)}
   .chatlog{flex:1;overflow:auto;display:flex;flex-direction:column;gap:14px;padding:6px 2px 18px}
   .cbubble{max-width:760px;border-radius:12px;padding:13px 16px;border:1px solid var(--line2)}
-  .cbubble.user{align-self:flex-end;background:rgba(127,233,255,.08);border-color:var(--line)}
+  .cbubble.user{align-self:flex-end;background:var(--accent-glow2);border-color:var(--line)}
   .cbubble.assistant{align-self:flex-start;background:var(--panel)}
   .cbubble.pending .ctext{color:var(--faint)}
   .ctext{white-space:pre-wrap;word-break:break-word;color:var(--text)}
@@ -215,7 +246,7 @@
   .csources{display:flex;flex-direction:column;gap:5px;margin-top:12px;padding-top:11px;border-top:1px solid var(--line2)}
   .csrc{display:flex;align-items:baseline;gap:7px;color:var(--muted);font-size:12.5px;text-decoration:none;
     padding:4px 7px;border-radius:7px}
-  .csrc:hover{background:rgba(127,233,255,.06);color:var(--text)}
+  .csrc:hover{background:var(--accent-glow);color:var(--text)}
   .csrc b{color:var(--accent)}
   .csrc .csect{color:var(--faint);font-size:11.5px}
   .chatbar{display:flex;gap:10px;padding-top:12px;border-top:1px solid var(--line)}
@@ -224,7 +255,7 @@
   .chatbar input:focus{border-color:var(--accent)}
 
   /* ---- key modal ---- */
-  .modal{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;align-items:center;justify-content:center;z-index:20;backdrop-filter:blur(3px)}
+  .modal{position:fixed;inset:0;background:var(--overlay);display:none;align-items:center;justify-content:center;z-index:20;backdrop-filter:blur(3px)}
   .modal.show{display:flex}
   .modal .box{background:var(--panel2);border:1px solid var(--line);border-radius:14px;padding:26px;width:min(460px,92vw)}
   .modal h2{margin:0 0 6px;font-size:17px}
@@ -232,7 +263,7 @@
   .modal input{width:100%;background:var(--bg);border:1px solid var(--line);border-radius:8px;color:var(--text);padding:10px 12px;font:inherit;outline:none}
   .modal input:focus{border-color:var(--accent)}
   .modal .row{display:flex;gap:10px;justify-content:flex-end;margin-top:16px}
-  .modal .save{background:var(--accent);color:#04070d;border:none;border-radius:8px;padding:9px 18px;font-weight:600}
+  .modal .save{background:var(--accent);color:var(--on-accent);border:none;border-radius:8px;padding:9px 18px;font-weight:600}
   .modal .cancel{background:transparent;border:1px solid var(--line);border-radius:8px;padding:9px 18px;color:var(--muted)}
   code{background:var(--line2);padding:1px 6px;border-radius:5px;color:var(--accent)}
 </style>
@@ -313,14 +344,14 @@
       <label class="gctl"><input type="checkbox" id="g-similar" checked onchange="drawGraph()"> similar</label>
       <input type="text" id="g-search" class="gctl" placeholder="highlight…" oninput="drawGraph()">
       <span class="glegend">
-        <span><i style="background:#7fe9ff"></i>paper</span>
-        <span><i style="background:#79e0a9"></i>idea</span>
-        <span><i style="background:#cfe0f0"></i>reflection</span>
+        <span><i style="background:var(--c-paper)"></i>paper</span>
+        <span><i style="background:var(--c-note)"></i>idea</span>
+        <span><i style="background:var(--c-reflection)"></i>reflection</span>
       </span>
       <span class="count" id="gcount"></span>
     </div>
     <div class="graphwrap">
-      <svg id="graph"></svg>
+      <canvas id="graph"></canvas>
       <div class="ginfo" id="ginfo"></div>
     </div>
   </section>
@@ -445,10 +476,13 @@ function show(v){
     $('nav-'+name).classList.toggle('active', name===v);
   });
   if (location.hash.slice(1) !== v) history.replaceState(null,'','#'+v);
+  // The graph wants the full viewport width; everything else stays centered.
+  document.body.classList.toggle('graphview', v==='graph');
   if (v==='analytics') loadAnalytics();
   if (v==='search') $('sq').focus();
   if (v==='chat') $('cq').focus();
-  if (v==='graph'){ setupGraph(); if (!gData) loadGraph(); }
+  if (v==='graph'){ setupGraph(); if (!gData) loadGraph(); else { resizeCanvas(); startGraphLoop(); } }
+  else stopGraphLoop();   // pause the render loop when the graph isn't visible
 }
 
 /* ---------- papers ---------- */
@@ -732,47 +766,94 @@ function resetChat(){
   $('chatlog').innerHTML = `<div class="msg">Conversation cleared. Ask a new question.</div>`;
 }
 
-/* ---------- graph (vanilla force-directed SVG) ---------- */
+/* ---------- graph (3D force-directed, canvas) ----------
+   Nodes live in a centred 3D point cloud. A force sim spreads them apart, and a
+   slowly-rotating perspective camera projects the cloud onto the canvas every
+   frame. Depth drives node size + opacity, so nearer nodes read as closer and
+   the layout no longer collapses into an overlapping 2D blob. */
 let gData = null;       // {nodes, edges} from /graph
-let gSim = null;        // live simulation state
-let gRAF = null;
-let gTransform = { x:0, y:0, k:1 };
+let gSim = null;        // { nodes, links, alpha }
+let gRAF = null;        // render-loop handle
+let gLoopOn = false;
 let gWired = false;
-const KIND_COLOR = { paper:'#7fe9ff', note:'#79e0a9', reflection:'#cfe0f0' };
+let gDragging = false;
+let gHover = -1;        // index of hovered node, or -1
+let gProj = [];         // last frame's projected {x,y,r,depth} per node — for hit-testing
+let gCam = { yaw:0.6, pitch:-0.35, zoom:1, auto:true };   // camera + gentle auto-spin
+const FOC = 1100;       // perspective focal length
 
-function svgSize(){ const r = $('graph').getBoundingClientRect(); return { w:r.width||900, h:r.height||600 }; }
-function applyTransform(){
-  const g = $('graph').querySelector('#groot');
-  if (g) g.setAttribute('transform', `translate(${gTransform.x},${gTransform.y}) scale(${gTransform.k})`);
+// Node fills come from CSS tokens so the graph follows the active theme.
+const KIND_VAR = { paper:'--c-paper', note:'--c-note', reflection:'--c-reflection' };
+function cssVar(name, fallback){
+  const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  return v || fallback;
 }
-function toGraph(ev){
-  const r = $('graph').getBoundingClientRect();
-  return { x:(ev.clientX-r.left-gTransform.x)/gTransform.k, y:(ev.clientY-r.top-gTransform.y)/gTransform.k };
+function kindColor(kind){ return cssVar(KIND_VAR[kind] || '--c-paper', '#7fe9ff'); }
+
+function canvasSize(){ const r = $('graph').getBoundingClientRect(); return { w:r.width||900, h:r.height||600 }; }
+// Match the backing store to the device pixel ratio so circles/text stay crisp.
+function resizeCanvas(){
+  const c = $('graph'), { w, h } = canvasSize(), dpr = window.devicePixelRatio || 1;
+  c.width = Math.round(w*dpr); c.height = Math.round(h*dpr);
+  c.getContext('2d').setTransform(dpr,0,0,dpr,0,0);
 }
 
-// Pan (drag background) + zoom (wheel). Wired once.
+// Rotate a node by the camera angles (yaw about Y, pitch about X), then project
+// to screen with perspective: points further back (larger z) shrink toward the centre.
+function project(n, w, h){
+  const cy = Math.cos(gCam.yaw), sy = Math.sin(gCam.yaw);
+  const cx = Math.cos(gCam.pitch), sx = Math.sin(gCam.pitch);
+  const x1 =  n.x*cy + n.z*sy, z1 = -n.x*sy + n.z*cy;
+  const y2 =  n.y*cx - z1*sx,  z2 =  n.y*sx + z1*cx;
+  const s = FOC/(FOC + z2) * gCam.zoom;
+  return { x:w/2 + x1*s, y:h/2 + y2*s, depth:z2, s };
+}
+
+// Drag rotates the camera; wheel zooms; a click that barely moves opens the node. Wired once.
 function setupGraph(){
   if (gWired) return; gWired = true;
-  const svg = $('graph');
-  let panning = false, sx=0, sy=0, ox=0, oy=0;
-  svg.addEventListener('mousedown', e => {
-    if (e.target.closest('.gnode')) return;   // node drag handles itself
-    panning = true; sx=e.clientX; sy=e.clientY; ox=gTransform.x; oy=gTransform.y;
-    svg.classList.add('panning');
+  const c = $('graph');
+  let sx0=0, sy0=0, yaw0=0, pit0=0, moved=0, downNode=-1;
+  c.addEventListener('mousedown', e => {
+    gDragging = true; moved = 0; sx0=e.clientX; sy0=e.clientY;
+    yaw0=gCam.yaw; pit0=gCam.pitch; downNode = nodeAt(e);
+    gCam.auto = false; c.classList.add('grabbing'); ensureGraphLoop();
   });
   document.addEventListener('mousemove', e => {
-    if (!panning) return;
-    gTransform.x = ox + (e.clientX-sx); gTransform.y = oy + (e.clientY-sy); applyTransform();
+    if (gDragging){
+      const dx=e.clientX-sx0, dy=e.clientY-sy0; moved += Math.abs(dx)+Math.abs(dy);
+      gCam.yaw   = yaw0 + dx*0.008;
+      gCam.pitch = Math.max(-1.45, Math.min(1.45, pit0 - dy*0.008));
+    } else if (document.body.classList.contains('graphview') && gSim){
+      const i = nodeAt(e); if (i!==gHover){ gHover=i; updateGraphInfo(); ensureGraphLoop(); }
+    }
   });
-  document.addEventListener('mouseup', () => { panning=false; svg.classList.remove('panning'); });
-  svg.addEventListener('wheel', e => {
+  document.addEventListener('mouseup', e => {
+    if (!gDragging) return;
+    gDragging = false; c.classList.remove('grabbing');
+    if (moved < 4 && downNode>=0 && nodeAt(e)===downNode){ show('papers'); openPaper(gSim.nodes[downNode].id); }
+  });
+  c.addEventListener('mouseleave', () => { if (gHover!==-1){ gHover=-1; updateGraphInfo(); ensureGraphLoop(); } });
+  c.addEventListener('wheel', e => {
     e.preventDefault();
-    const r = svg.getBoundingClientRect(), mx=e.clientX-r.left, my=e.clientY-r.top;
-    const f = e.deltaY < 0 ? 1.1 : 1/1.1, k = Math.max(0.2, Math.min(4, gTransform.k*f));
-    gTransform.x = mx - (mx-gTransform.x)*(k/gTransform.k);
-    gTransform.y = my - (my-gTransform.y)*(k/gTransform.k);
-    gTransform.k = k; applyTransform();
+    gCam.zoom = Math.max(0.25, Math.min(4, gCam.zoom * (e.deltaY<0 ? 1.1 : 1/1.1)));
+    ensureGraphLoop();
   }, { passive:false });
+  window.addEventListener('resize', () => {
+    if (document.body.classList.contains('graphview')){ resizeCanvas(); ensureGraphLoop(); }
+  });
+}
+
+// Hit-test the last projected frame: nearest node whose disc covers the cursor.
+function nodeAt(ev){
+  const r = $('graph').getBoundingClientRect(), mx=ev.clientX-r.left, my=ev.clientY-r.top;
+  let best=-1, bestD=Infinity;
+  for (let i=0;i<gProj.length;i++){
+    const p=gProj[i]; if(!p) continue;
+    const d=Math.hypot(mx-p.x, my-p.y);
+    if (d <= p.r+3 && d < bestD){ bestD=d; best=i; }
+  }
+  return best;
 }
 
 async function loadGraph(){
@@ -780,11 +861,11 @@ async function loadGraph(){
   $('gcount').textContent = 'Loading…';
   try{
     gData = await api('/graph?neighbors=' + encodeURIComponent(n));
-    gTransform = { x:0, y:0, k:1 };
+    gCam = { yaw:0.6, pitch:-0.35, zoom:1, auto:true };
     initSim();
     $('gcount').textContent = `${gData.nodes.length} nodes · ${gData.edges.length} edges`;
   }catch(e){
-    gData = null;
+    gData = null; gSim = null; stopGraphLoop();
     $('gcount').textContent = '';
     $('ginfo').style.display = 'block';
     $('ginfo').innerHTML = `<span class="err">${esc(e.message)}</span>`;
@@ -792,128 +873,150 @@ async function loadGraph(){
 }
 
 function initSim(){
-  cancelAnimationFrame(gRAF); gRAF = null;
-  const { w, h } = svgSize();
   const deg = {};
   gData.edges.forEach(e => { deg[e.source]=(deg[e.source]||0)+1; deg[e.target]=(deg[e.target]||0)+1; });
-  const R = Math.min(w,h) * 0.35;
+  const N = gData.nodes.length, R = 60 + N*3.5;
+  // Seed positions on a Fibonacci sphere so nothing starts stacked on anything.
   const nodes = gData.nodes.map((d,i) => {
-    const a = (i / Math.max(1,gData.nodes.length)) * Math.PI * 2;
+    const phi = Math.acos(1 - 2*(i+0.5)/Math.max(1,N)), theta = Math.PI*(1+Math.sqrt(5))*i;
     return { ...d, deg:deg[d.id]||0,
-      x: w/2 + Math.cos(a)*R + (Math.random()-0.5)*30,
-      y: h/2 + Math.sin(a)*R + (Math.random()-0.5)*30,
-      vx:0, vy:0, fx:null, fy:null };
+      x: R*Math.sin(phi)*Math.cos(theta), y: R*Math.sin(phi)*Math.sin(theta), z: R*Math.cos(phi),
+      vx:0, vy:0, vz:0 };
   });
+  nodes.forEach((n,i) => n._i = i);
   const byId = {}; nodes.forEach(n => byId[n.id]=n);
   const links = gData.edges
     .map(e => ({ source:byId[e.source], target:byId[e.target], kind:e.kind, weight:e.weight }))
     .filter(l => l.source && l.target);
   gSim = { nodes, byId, links, alpha:1 };
-  buildGraphDom();
-  tick();
+  gHover = -1; gProj = [];
+  resizeCanvas();
+  startGraphLoop();
 }
 
-function tick(){
-  const { w, h } = svgSize();
-  const { nodes, links } = gSim, k = gSim.alpha, REP = 1600, LEN = 95;
+// One physics step in 3D: pairwise repulsion + link springs + pull toward origin.
+function physics(){
+  const { nodes, links } = gSim, k = gSim.alpha, REP = 6000, LEN = 120;
   for (let i=0;i<nodes.length;i++){
     for (let j=i+1;j<nodes.length;j++){
       const a=nodes[i], b=nodes[j];
-      let dx=a.x-b.x, dy=a.y-b.y, d2=dx*dx+dy*dy||0.01, d=Math.sqrt(d2), f=REP/d2;
-      const fx=dx/d*f, fy=dy/d*f;
-      a.vx+=fx; a.vy+=fy; b.vx-=fx; b.vy-=fy;
+      let dx=a.x-b.x, dy=a.y-b.y, dz=a.z-b.z, d2=dx*dx+dy*dy+dz*dz||0.01, d=Math.sqrt(d2), f=REP/d2;
+      const fx=dx/d*f, fy=dy/d*f, fz=dz/d*f;
+      a.vx+=fx; a.vy+=fy; a.vz+=fz; b.vx-=fx; b.vy-=fy; b.vz-=fz;
     }
   }
   links.forEach(l => {
-    let dx=l.target.x-l.source.x, dy=l.target.y-l.source.y, d=Math.sqrt(dx*dx+dy*dy)||0.01;
-    const f=(d-LEN)*(l.kind==='link'?0.08:0.03), fx=dx/d*f, fy=dy/d*f;
-    l.source.vx+=fx; l.source.vy+=fy; l.target.vx-=fx; l.target.vy-=fy;
+    let dx=l.target.x-l.source.x, dy=l.target.y-l.source.y, dz=l.target.z-l.source.z;
+    const d=Math.sqrt(dx*dx+dy*dy+dz*dz)||0.01, f=(d-LEN)*(l.kind==='link'?0.06:0.025);
+    const fx=dx/d*f, fy=dy/d*f, fz=dz/d*f;
+    l.source.vx+=fx; l.source.vy+=fy; l.source.vz+=fz;
+    l.target.vx-=fx; l.target.vy-=fy; l.target.vz-=fz;
   });
   nodes.forEach(n => {
-    n.vx += (w/2-n.x)*0.002; n.vy += (h/2-n.y)*0.002;
-    if (n.fx!=null){ n.x=n.fx; n.y=n.fy; n.vx=0; n.vy=0; return; }
-    n.vx*=0.86; n.vy*=0.86; n.x+=n.vx*k; n.y+=n.vy*k;
+    n.vx += -n.x*0.0035; n.vy += -n.y*0.0035; n.vz += -n.z*0.0035;
+    n.vx*=0.86; n.vy*=0.86; n.vz*=0.86;
+    n.x+=n.vx*k; n.y+=n.vy*k; n.z+=n.vz*k;
   });
-  gSim.alpha *= 0.99;
-  renderGraphPositions();
-  if (gSim.alpha > 0.02) gRAF = requestAnimationFrame(tick); else gRAF = null;
+  gSim.alpha *= 0.986;
 }
 
-function buildGraphDom(){
-  const svg = $('graph');
-  svg.innerHTML = `<g id="groot"><g id="gedges"></g><g id="gnodes"></g></g>`;
-  svg.querySelector('#gedges').innerHTML = gSim.links
-    .map((l,i) => `<line class="gedge ge-${l.kind}" data-i="${i}"></line>`).join('');
-  svg.querySelector('#gnodes').innerHTML = gSim.nodes.map((n,i) => {
-    const r = 6 + Math.min(14, Math.sqrt(n.chunks||1)*1.4);
-    const col = KIND_COLOR[n.kind] || '#7fe9ff';
-    const t = n.title.length>34 ? n.title.slice(0,33)+'…' : n.title;
-    return `<g class="gnode" data-i="${i}">
-      <circle r="${r.toFixed(1)}" fill="${col}" fill-opacity="0.85" stroke="#04070d" stroke-width="1.5"></circle>
-      <text x="${(r+3).toFixed(1)}" y="4" class="glabel">${esc(t)}</text></g>`;
-  }).join('');
-  attachGraphEvents();
-  applyTransform();
-  drawGraph();
+/* ---- render loop: physics settles, the camera keeps spinning ---- */
+function startGraphLoop(){ if (gLoopOn || !gSim) return; gLoopOn = true; gRAF = requestAnimationFrame(renderLoop); }
+function stopGraphLoop(){ gLoopOn = false; if (gRAF) cancelAnimationFrame(gRAF); gRAF = null; }
+function ensureGraphLoop(){ if (!gLoopOn) startGraphLoop(); }
+
+function renderLoop(){
+  if (!gLoopOn || !gSim){ gLoopOn=false; gRAF=null; return; }
+  if (gSim.alpha > 0.004) physics();
+  if (gCam.auto && gHover<0 && !gDragging) gCam.yaw += 0.0016;   // idle spin
+  renderGraph();
+  // Keep animating while there's motion; otherwise idle until the next interaction.
+  if (gCam.auto || gDragging || gSim.alpha > 0.004) gRAF = requestAnimationFrame(renderLoop);
+  else { gLoopOn = false; gRAF = null; }
 }
 
-function renderGraphPositions(){
-  const lines = $('graph').querySelectorAll('.gedge');
-  gSim.links.forEach((l,i) => {
-    const el=lines[i]; if(!el) return;
-    el.setAttribute('x1',l.source.x.toFixed(1)); el.setAttribute('y1',l.source.y.toFixed(1));
-    el.setAttribute('x2',l.target.x.toFixed(1)); el.setAttribute('y2',l.target.y.toFixed(1));
-  });
-  const gs = $('graph').querySelectorAll('.gnode');
-  gSim.nodes.forEach((n,i) => { const el=gs[i]; if(el) el.setAttribute('transform',`translate(${n.x.toFixed(1)},${n.y.toFixed(1)})`); });
-}
+function renderGraph(){
+  const ctx = $('graph').getContext('2d'), { w, h } = canvasSize();
+  const { nodes, links } = gSim;
+  ctx.clearRect(0,0,w,h);
 
-function attachGraphEvents(){
-  $('graph').querySelectorAll('.gnode').forEach(el => {
-    const i = +el.dataset.i, n = gSim.nodes[i];
-    el.addEventListener('mouseenter', () => highlightNode(i, true));
-    el.addEventListener('mouseleave', () => highlightNode(i, false));
-    el.addEventListener('mousedown', ev => startNodeDrag(ev, i));
-    el.addEventListener('click', () => { if (el._dragged){ el._dragged=false; return; } show('papers'); openPaper(n.id); });
-  });
-}
-function startNodeDrag(ev, i){
-  ev.preventDefault(); ev.stopPropagation();
-  const n = gSim.nodes[i], el = $('graph').querySelectorAll('.gnode')[i];
-  const move = mev => { const p=toGraph(mev); n.fx=p.x; n.fy=p.y; el._dragged=true; gSim.alpha=Math.max(gSim.alpha,0.3); if(!gRAF) tick(); };
-  const up = () => { document.removeEventListener('mousemove',move); document.removeEventListener('mouseup',up); n.fx=null; n.fy=null; };
-  document.addEventListener('mousemove', move); document.addEventListener('mouseup', up);
-}
-function highlightNode(i, on){
-  const n = gSim.nodes[i], nbr = new Set([n.id]);
-  gSim.links.forEach(l => { if(l.source.id===n.id) nbr.add(l.target.id); if(l.target.id===n.id) nbr.add(l.source.id); });
-  $('graph').querySelectorAll('.gnode').forEach((el,j) => { el.style.opacity = (!on||nbr.has(gSim.nodes[j].id)) ? '' : '0.15'; });
-  $('graph').querySelectorAll('.gedge').forEach((el,j) => {
-    const l = gSim.links[j], inc = l.source.id===n.id || l.target.id===n.id;
-    el.classList.toggle('hot', on && inc);
-    el.style.opacity = on ? (inc ? '1' : '0.05') : '';
-  });
-  const info = $('ginfo');
-  if (on){ info.style.display='block'; info.innerHTML = `<b>${esc(n.title)}</b><br><span class="gsub">${esc(n.kind)} · ${n.chunks} chunks · ${n.deg} connections</span>`; }
-  else { info.style.display='none'; info.innerHTML=''; }
-}
-
-// Apply the link/similar filters and the highlight query without re-laying out.
-function drawGraph(){
-  if (!gSim) return;
   const showLink = $('g-links').checked, showSim = $('g-similar').checked;
   const q = $('g-search').value.toLowerCase().trim();
-  $('graph').querySelectorAll('.gedge').forEach((el,j) => {
-    const l = gSim.links[j], vis = (l.kind==='link'&&showLink) || (l.kind==='similar'&&showSim);
-    el.style.display = vis ? '' : 'none';
+
+  // Project every node; remember discs for hit-testing.
+  const P = nodes.map(n => project(n, w, h));
+  let dmin=Infinity, dmax=-Infinity;
+  P.forEach(p => { if(p.depth<dmin)dmin=p.depth; if(p.depth>dmax)dmax=p.depth; });
+  const span = (dmax-dmin) || 1;
+  gProj = P.map((p,i) => ({ x:p.x, y:p.y, r:(4 + Math.min(13, Math.sqrt(nodes[i].chunks||1)*1.3))*p.s, depth:p.depth }));
+
+  // Neighbour set for hover dimming.
+  let nbr = null;
+  if (gHover>=0){
+    const hid = nodes[gHover].id; nbr = new Set([hid]);
+    links.forEach(l => { if(l.source.id===hid) nbr.add(l.target.id); if(l.target.id===hid) nbr.add(l.source.id); });
+  }
+
+  // ---- edges (behind the nodes) ----
+  const accent = cssVar('--accent','#7fe9ff'), accentDim = cssVar('--accent-dim','#5f7b97');
+  links.forEach(l => {
+    if (!((l.kind==='link'&&showLink) || (l.kind==='similar'&&showSim))) return;
+    const a=P[l.source._i], b=P[l.target._i];
+    const inc = gHover>=0 && (l.source.id===nodes[gHover].id || l.target.id===nodes[gHover].id);
+    ctx.globalAlpha = gHover>=0 ? (inc?0.9:0.04) : (l.kind==='similar'?0.16:0.28);
+    ctx.strokeStyle = inc ? accent : accentDim;
+    ctx.lineWidth = inc ? 1.6 : 1;
+    ctx.setLineDash(l.kind==='similar' ? [3,3] : []);
+    ctx.beginPath(); ctx.moveTo(a.x,a.y); ctx.lineTo(b.x,b.y); ctx.stroke();
   });
-  $('graph').querySelectorAll('.gnode').forEach((el,j) => {
-    const n = gSim.nodes[j];
+  ctx.setLineDash([]);
+
+  // ---- nodes, painted far-to-near (painter's algorithm) ----
+  const order = nodes.map((_,i)=>i).sort((i,j)=> P[j].depth - P[i].depth);
+  const bg = cssVar('--bg','#04070d'), muted = cssVar('--muted','#8fa3ba'), text = cssVar('--text','#dfe9f5');
+  // Resolve the three kind colours once per frame (not per node).
+  const KCOL = { paper:kindColor('paper'), note:kindColor('note'), reflection:kindColor('reflection') };
+  ctx.textBaseline = 'middle';
+  order.forEach(i => {
+    const n=nodes[i], p=P[i], gp=gProj[i];
+    const dn = 1 - (p.depth - dmin)/span;        // 1 = nearest, 0 = farthest
     const match = q && (n.title.toLowerCase().includes(q) || (n.tags||[]).some(t => t.toLowerCase().includes(q)));
-    el.classList.toggle('match', !!match);
-    el.style.opacity = (!q || match) ? '' : '0.2';
+    let alpha = 0.4 + 0.6*dn;
+    if (gHover>=0) alpha *= nbr.has(n.id) ? 1 : 0.16;
+    if (q) alpha *= match ? 1 : 0.22;
+
+    ctx.globalAlpha = alpha;
+    ctx.beginPath(); ctx.arc(p.x, p.y, gp.r, 0, Math.PI*2);
+    ctx.fillStyle = KCOL[n.kind] || KCOL.paper; ctx.fill();
+    const hot = match || i===gHover;
+    ctx.lineWidth = hot ? 2.5 : 1.2; ctx.strokeStyle = hot ? accent : bg; ctx.stroke();
+
+    if (dn>0.62 || i===gHover || match){
+      const t = n.title.length>34 ? n.title.slice(0,33)+'…' : n.title;
+      ctx.globalAlpha = Math.min(1, alpha+0.2);
+      ctx.fillStyle = hot ? text : muted;
+      ctx.font = `${(10*Math.max(0.85,p.s)).toFixed(0)}px -apple-system,"SF Pro Display","Segoe UI",sans-serif`;
+      ctx.fillText(t, p.x+gp.r+4, p.y);
+    }
   });
+  ctx.globalAlpha = 1;
 }
+
+function updateGraphInfo(){
+  const info = $('ginfo');
+  if (gHover>=0 && gSim){
+    const n = gSim.nodes[gHover];
+    info.style.display='block';
+    info.innerHTML = `<b>${esc(n.title)}</b><br><span class="gsub">${esc(n.kind)} · ${n.chunks} chunks · ${n.deg} connections</span>`;
+    $('graph').style.cursor = 'pointer';
+  } else {
+    info.style.display='none'; info.innerHTML='';
+    $('graph').style.cursor = '';
+  }
+}
+
+// Filter/highlight controls just request a repaint — render reads them live.
+function drawGraph(){ if (gSim) ensureGraphLoop(); }
 
 /* ---------- boot ---------- */
 function init(){ keyStatus(); loadPapers(); }
