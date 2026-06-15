@@ -188,6 +188,41 @@ kb search "agent memory" --section reflection           # retrieve stored reflec
 kb search "agent memory" --wide                         # reflections surface here too
 ```
 
+### Cortex — the associative layer (sparks)
+
+```bash
+kb spark                                # the most surprising connections in your corpus
+kb spark --kind need_solution -k 20     # only "someone wished for this; someone built it"
+kb spark --kind cross_domain            # only same-idea-across-fields links
+kb cortex rebuild                       # recompute the whole layer from the embeddings
+```
+
+Cortex is what makes the KB behave less like a search index and more like a
+mind: it keeps forming connections between what you've saved, and surfaces the
+*unexpected* ones. On every ingest it materializes edges from the new
+document's chunks to the rest of the corpus and keeps the **surprising** ones —
+not nearest-neighbor similarity (that only finds near-duplicates), but
+connections that are semantically close yet structurally distant, which is
+where new ideas live. Two signals are scored, **both API-free** (they reuse the
+embedding cache, no extra calls):
+
+- **need → solution** (directed): one chunk's `future_work`/`limitations` (a
+  stated need) sits close to another's `method`/`experiments`/`applications` (a
+  delivered capability) — *"someone wished for this; someone else built it."*
+  This uses the corpus's section types, a structural signal most systems
+  discard.
+- **cross-domain** (undirected): two chunks are close in meaning but their
+  papers share no arXiv category — the same idea echoing across fields, a
+  transfer-of-ideas opportunity.
+
+Connections live in `meta.db`'s `cortex_edges` table — **derived state**, like
+the index itself: `kb cortex rebuild` reconstructs it from the embeddings (no
+re-embedding, so it's cheap) and `kb reindex` rebuilds it as part of a full
+rebuild. Surface them with `kb spark` or the web app's **Sparks** view. Tune
+the thresholds under `[cortex]` in `config.toml` (`min_similarity`,
+`min_domain_distance`); see [CONFIG.md](./CONFIG.md). Turn the whole layer off
+with `[cortex] enabled = false`.
+
 ### Notes and tags
 
 ```bash
@@ -262,6 +297,7 @@ startup (override with `KB_API_KEY`, rotate with `kb rotate-key`).
 | `POST /search` | semantic search (body: `query`, `mode`, `k`, filters) |
 | `GET /papers/{id}/similar` | documents most similar to this one (`?limit=`) |
 | `GET /graph` | the corpus as nodes + edges (`?neighbors=` similarity edges per node) |
+| `GET /sparks` | Cortex's surprising connections (`?kind=need_solution\|cross_domain`, `?limit=`) |
 | `POST /chat` | RAG answer over the corpus, with cited sources (body: `query`, optional `history`) |
 | `POST /papers/{id}/notes` | append a note and re-embed |
 | `GET /chunks/{id}` | full chunk text + deep link |
@@ -269,7 +305,7 @@ startup (override with `KB_API_KEY`, rotate with `kb rotate-key`).
 
 The web app needs no build step. Open the `http://127.0.0.1:4321/?key=…`
 link printed by `kb serve` — it seeds the key into your browser
-(`localStorage`) — and you get five views:
+(`localStorage`) — and you get six views:
 
 - **Papers** — filter by text/tag/category/kind; open any document's
   abstract, notes, and PDF deep-link. Each detail panel also shows a
@@ -286,6 +322,9 @@ link printed by `kb serve` — it seeds the key into your browser
   explicit `[[id]]`/`--link`/`--scope` relations plus nearest-neighbor
   *similarity* edges. Drag nodes, pan/zoom, filter edge types, highlight by
   text, click a node to open the document.
+- **Sparks** — Cortex's surprising connections, most surprising first: a
+  per-connection card with both bridged passages, filterable by signal
+  (need→solution / cross-domain). Click either side to open the document.
 - **Analytics** — document/chunk counts, chunks-per-section breakdown, and a
   tag cloud.
 

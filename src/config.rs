@@ -15,6 +15,7 @@ pub struct Config {
     pub chat: ChatConfig,
     pub turbovec: TurbovecConfig,
     pub search: SearchConfig,
+    pub cortex: CortexConfig,
     pub ingest: IngestConfig,
     pub server: ServerConfig,
     pub watcher: WatcherConfig,
@@ -28,6 +29,7 @@ impl Default for Config {
             chat: ChatConfig::default(),
             turbovec: TurbovecConfig::default(),
             search: SearchConfig::default(),
+            cortex: CortexConfig::default(),
             ingest: IngestConfig::default(),
             server: ServerConfig::default(),
             watcher: WatcherConfig::default(),
@@ -237,12 +239,74 @@ impl Default for RankingConfig {
     }
 }
 
+/// Cortex — the persistent associative layer (the "brain"). Where retrieval
+/// answers *"what is relevant to this query"*, Cortex answers *"what
+/// unexpected connection is worth noticing"*. On every ingest it materializes
+/// edges between the new document's chunks and the rest of the corpus, but
+/// keeps only the **surprising** ones — connections that are semantically close
+/// yet structurally distant, which is where novel ideas live (pure
+/// nearest-neighbor similarity surfaces the obvious, not the inventive).
+///
+/// Two signals are scored (both API-free — they reuse the embedding cache):
+///
+/// - **need→solution** (directed): one chunk's `future_work`/`limitations`
+///   (a stated need) sits close to another chunk's `method`/`experiments`/
+///   `applications` (a delivered capability). "Someone wished for this;
+///   someone else built it."
+/// - **cross-domain** (undirected): two chunks are close in meaning but their
+///   papers share no arXiv category — the same idea surfacing in a different
+///   field, i.e. a transfer-of-ideas opportunity.
+///
+/// Edges live in `meta.db`'s `cortex_edges` table — derived state, rebuilt by
+/// `kb reindex` (or `kb cortex rebuild`) from the embeddings, never canonical.
+/// Surface them with `kb spark` or the web app's Sparks view.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CortexConfig {
+    /// `false` ⇒ no edges materialized on ingest and `kb spark` stays empty.
+    /// On by default: it costs no API calls and is the point of the system.
+    pub enabled: bool,
+    /// Cross-paper nearest neighbors examined per chunk when looking for
+    /// connections. Higher ⇒ more candidate edges (and more ingest compute).
+    pub neighbors: usize,
+    /// Proximity floor: a pair must reach at least this exact cosine to be a
+    /// connection at all. Calibrated for text-embedding-3-small, whose related
+    /// passages sit around 0.45-0.65 — high enough that an edge means
+    /// something, low enough that genuine cross-field echoes survive.
+    pub min_similarity: f32,
+    /// Cross-domain gate: `1 - Jaccard(categories)` must reach this. `1.0` ⇒
+    /// the papers' arXiv categories must be fully disjoint (default); lower it
+    /// to also surface partial-overlap connections.
+    pub min_domain_distance: f32,
+    /// Default number of sparks returned by `kb spark` / the web view.
+    pub max_sparks: usize,
+}
+
+impl Default for CortexConfig {
+    fn default() -> Self {
+        CortexConfig {
+            enabled: true,
+            neighbors: 6,
+            min_similarity: 0.5,
+            min_domain_distance: 1.0,
+            max_sparks: 50,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct IngestConfig {
     pub chunk_max_tokens: usize,
     pub prefer_latex: bool,
     pub pandoc_path: String,
+    /// LLM fallback for the section classifier: when a heading's deterministic
+    /// classification is `other`, ask the chat model (`[chat] model`) to map it
+    /// to a real section type. One batched call per paper, only for the
+    /// otherwise-`other` headings — the keyword fast-path is unchanged, and the
+    /// call is best-effort (a failure or missing `OPENAI_API_KEY` falls back to
+    /// `other`). The PRD pre-authorized this once the Other ratio exceeds ~25%.
+    pub classify_with_llm: bool,
 }
 
 impl Default for IngestConfig {
@@ -251,6 +315,7 @@ impl Default for IngestConfig {
             chunk_max_tokens: 2000,
             prefer_latex: true,
             pandoc_path: "pandoc".into(),
+            classify_with_llm: true,
         }
     }
 }

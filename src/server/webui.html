@@ -216,6 +216,22 @@
   .reltitle{flex:1;color:var(--text);font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .relscore{color:var(--accent);font-size:12px;font-weight:600}
 
+  /* ---- sparks (cortex connections) ---- */
+  .sparks{display:flex;flex-direction:column;gap:14px}
+  .spark{background:var(--panel);border:1px solid var(--line2);border-radius:12px;padding:14px 16px}
+  .spark .shead{display:flex;align-items:center;gap:10px;margin-bottom:10px}
+  .spark .skind{font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;
+    padding:2px 8px;border-radius:999px;border:1px solid var(--line)}
+  .spark .skind.need_solution{color:#ffd27f;border-color:#ffd27f55}
+  .spark .skind.cross_domain{color:#9ad7ff;border-color:#9ad7ff55}
+  .spark .ssurprise{margin-left:auto;font-variant-numeric:tabular-nums;color:var(--muted);font-size:13px}
+  .spark .send{padding:8px 10px;border-radius:8px;cursor:pointer;border:1px solid transparent}
+  .spark .send:hover{border-color:var(--line);background:var(--accent-soft,rgba(127,233,255,.06))}
+  .spark .send .st{font-weight:600;font-size:14px}
+  .spark .send .ss{color:var(--muted);font-size:12px;margin-top:2px}
+  .spark .send .ssec{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.03em}
+  .spark .sarrow{text-align:center;color:var(--muted);font-size:15px;padding:2px 0}
+
   /* ---- graph ---- */
   .gctl{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:13px}
   .gctl select,.gctl input[type=text]{background:var(--panel);border:1px solid var(--line);border-radius:8px;
@@ -276,6 +292,7 @@
     <button id="nav-search" onclick="show('search')">Search</button>
     <button id="nav-chat" onclick="show('chat')">Chat</button>
     <button id="nav-graph" onclick="show('graph')">Graph</button>
+    <button id="nav-sparks" onclick="show('sparks')">Sparks</button>
     <button id="nav-analytics" onclick="show('analytics')">Analytics</button>
   </nav>
   <div class="spacer"></div>
@@ -354,6 +371,19 @@
       <canvas id="graph"></canvas>
       <div class="ginfo" id="ginfo"></div>
     </div>
+  </section>
+
+  <section id="view-sparks" style="display:none">
+    <div class="filters">
+      <select id="sp-kind" onchange="loadSparks()" title="which surprising signal to show">
+        <option value="all">all sparks</option>
+        <option value="need_solution">need → solution</option>
+        <option value="cross_domain">cross-domain</option>
+      </select>
+      <span class="count" id="spcount"></span>
+      <span class="glegend">unexpected connections Cortex formed across your corpus</span>
+    </div>
+    <div id="sparks"><div class="msg">Loading connections…</div></div>
   </section>
 
   <section id="view-analytics" style="display:none">
@@ -468,7 +498,7 @@ async function api(path, opts={}){
   return r.json();
 }
 
-const VIEWS = ['papers','search','chat','graph','analytics'];
+const VIEWS = ['papers','search','chat','graph','sparks','analytics'];
 function show(v){
   if (!VIEWS.includes(v)) v='papers';
   VIEWS.forEach(name => {
@@ -479,6 +509,7 @@ function show(v){
   // The graph wants the full viewport width; everything else stays centered.
   document.body.classList.toggle('graphview', v==='graph');
   if (v==='analytics') loadAnalytics();
+  if (v==='sparks') loadSparks();
   if (v==='search') $('sq').focus();
   if (v==='chat') $('cq').focus();
   if (v==='graph'){ setupGraph(); if (!gData) loadGraph(); else { resizeCanvas(); startGraphLoop(); } }
@@ -663,6 +694,45 @@ function renderResults(res){
       ${hits}
     </div>`;
   }).join('');
+}
+
+/* ---------- sparks (cortex associative layer) ---------- */
+function goPaper(id){ show('papers'); openPaper(id); }
+
+async function loadSparks(){
+  const kind = $('sp-kind').value;
+  $('spcount').textContent = '';
+  $('sparks').innerHTML = `<div class="msg">Loading connections…</div>`;
+  try{
+    const r = await api('/sparks?limit=60' + (kind && kind!=='all' ? '&kind='+encodeURIComponent(kind) : ''));
+    const list = r.sparks || [];
+    $('spcount').textContent = `${list.length} connection${list.length===1?'':'s'}`;
+    if (!list.length){
+      $('sparks').innerHTML = `<div class="msg">No sparks yet. Add a few more documents, then run
+        <code>kb cortex rebuild</code> (or <code>kb reindex</code>) to scan the corpus.</div>`;
+      return;
+    }
+    $('sparks').innerHTML = list.map(s => {
+      const kindLabel = s.kind==='need_solution' ? 'need → solution' : 'cross-domain';
+      const arrow = s.directed ? '⇩' : '⇅';
+      const end = e => `<div class="send" onclick="goPaper('${esc(e.paper_id)}')" title="Open ${esc(e.title)}">
+          <div class="st">${esc(e.title)}</div>
+          <div class="ssec">${esc(e.section_type)}</div>
+          <div class="ss">${esc(e.snippet)}</div>
+        </div>`;
+      return `<div class="spark">
+        <div class="shead">
+          <span class="skind ${esc(s.kind)}">${esc(kindLabel)}</span>
+          <span class="ssurprise">surprise ${(s.surprise||0).toFixed(3)}</span>
+        </div>
+        ${end(s.src)}
+        <div class="sarrow">${arrow}</div>
+        ${end(s.dst)}
+      </div>`;
+    }).join('');
+  }catch(e){
+    $('sparks').innerHTML = `<div class="msg err">${esc(e.message)}</div>`;
+  }
 }
 
 /* ---------- analytics ---------- */

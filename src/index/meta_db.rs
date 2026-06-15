@@ -23,6 +23,39 @@ pub struct NewChunk {
     pub embedding_version: u32,
 }
 
+/// Insert payload for one Cortex edge (a materialized surprising connection).
+/// `src_chunk`/`dst_chunk` are `chunks.id`; for `need_solution` the direction
+/// is meaningful (src = need, dst = solution), for `cross_domain` the caller
+/// passes them in canonical order (`src_chunk < dst_chunk`).
+#[derive(Debug, Clone)]
+pub struct NewCortexEdge {
+    pub src_chunk: i64,
+    pub dst_chunk: i64,
+    pub src_paper: String,
+    pub dst_paper: String,
+    pub kind: String,
+    pub similarity: f32,
+    pub surprise: f32,
+}
+
+/// One Cortex edge joined to both endpoints' chunk records, for display
+/// (`kb spark`, `GET /sparks`). Snippet/section come from the live `chunks`
+/// rows, so an edge whose chunk was deleted simply never surfaces.
+#[derive(Debug, Clone)]
+pub struct CortexEdgeRow {
+    pub kind: String,
+    pub similarity: f32,
+    pub surprise: f32,
+    pub src_paper: String,
+    pub src_chunk_id: String,
+    pub src_section: String,
+    pub src_snippet: String,
+    pub dst_paper: String,
+    pub dst_chunk_id: String,
+    pub dst_section: String,
+    pub dst_snippet: String,
+}
+
 /// Corpus stats for `kb stats` (includes the Other-ratio health signal —
 /// resolved decision: revisit classifier if it exceeds ~25%).
 #[derive(Debug, Default, serde::Serialize)]
@@ -88,6 +121,26 @@ CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
   text,
   tokenize = 'porter unicode61'
 );
+
+-- Cortex associative layer: persistent surprising connections between chunks,
+-- materialized at ingest (see crate::cortex). Derived state — rebuilt from the
+-- embeddings by `kb reindex` / `kb cortex rebuild`. `kind` is 'need_solution'
+-- (directed: src = the stated need, dst = the delivered capability) or
+-- 'cross_domain' (undirected, stored canonical src_chunk < dst_chunk).
+CREATE TABLE IF NOT EXISTS cortex_edges (
+  src_chunk     INTEGER NOT NULL,
+  dst_chunk     INTEGER NOT NULL,
+  src_paper     TEXT NOT NULL,
+  dst_paper     TEXT NOT NULL,
+  kind          TEXT NOT NULL,
+  similarity    REAL NOT NULL,
+  surprise      REAL NOT NULL,
+  discovered_at TEXT NOT NULL,
+  PRIMARY KEY (src_chunk, dst_chunk, kind)
+);
+CREATE INDEX IF NOT EXISTS idx_cortex_src ON cortex_edges(src_paper);
+CREATE INDEX IF NOT EXISTS idx_cortex_dst ON cortex_edges(dst_paper);
+CREATE INDEX IF NOT EXISTS idx_cortex_surprise ON cortex_edges(surprise);
 ";
 
 const PERSISTENT_SCHEMA: &str = "
@@ -617,6 +670,7 @@ impl MetaDb {
             .execute("DELETE FROM paper_tags WHERE paper_id = ?1", [paper_id])?;
         self.conn
             .execute("DELETE FROM documents WHERE paper_id = ?1", [paper_id])?;
+        self.delete_cortex_edges_for_paper(paper_id)?;
         Ok(ids)
     }
 
@@ -629,10 +683,104 @@ impl MetaDb {
              DROP TABLE IF EXISTS chunks_fts; \
              DROP TABLE IF EXISTS pdf_toc; \
              DROP TABLE IF EXISTS paper_tags; \
-             DROP TABLE IF EXISTS documents;",
+             DROP TABLE IF EXISTS documents; \
+             DROP TABLE IF EXISTS cortex_edges;",
         )?;
         self.conn.execute_batch(DERIVED_SCHEMA)?;
         Ok(())
+    }
+
+    // ---- cortex edges (the associative layer; see crate::cortex) ----
+
+    /// Upsert one edge. The PK `(src_chunk, dst_chunk, kind)` makes re-discovery
+    /// idempotent — connecting either endpoint's paper writes the same row.
+    pub fn insert_cortex_edge(&self, e: &NewCortexEdge) -> Result<(), KbError> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO cortex_edges \
+             (src_chunk, dst_chunk, src_paper, dst_paper, kind, similarity, surprise, discovered_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![
+                e.src_chunk,
+                e.dst_chunk,
+                e.src_paper,
+                e.dst_paper,
+                e.kind,
+                e.similarity,
+                e.surprise,
+                crate::now_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Drop every edge incident to a paper (either endpoint). Called before a
+    /// paper's edges are recomputed (its chunk ids change on re-embed) and when
+    /// it is removed, so the layer never references a vanished chunk.
+    pub fn delete_cortex_edges_for_paper(&self, paper_id: &str) -> Result<(), KbError> {
+        self.conn.execute(
+            "DELETE FROM cortex_edges WHERE src_paper = ?1 OR dst_paper = ?1",
+            [paper_id],
+        )?;
+        Ok(())
+    }
+
+    /// Drop all edges (full `kb cortex rebuild` / `kb reindex`).
+    pub fn clear_cortex_edges(&self) -> Result<(), KbError> {
+        self.conn.execute("DELETE FROM cortex_edges", [])?;
+        Ok(())
+    }
+
+    pub fn cortex_edge_count(&self) -> Result<usize, KbError> {
+        let n: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM cortex_edges", [], |r| r.get(0))?;
+        Ok(n as usize)
+    }
+
+    /// Top edges by surprise (descending), each joined to both endpoints'
+    /// chunk rows. `kind` optionally restricts to one signal. The inner JOINs
+    /// drop any edge whose endpoints no longer exist, so the result is always
+    /// consistent with the live `chunks` table.
+    pub fn top_sparks(
+        &self,
+        limit: usize,
+        kind: Option<&str>,
+    ) -> Result<Vec<CortexEdgeRow>, KbError> {
+        let mut sql = String::from(
+            "SELECT e.kind, e.similarity, e.surprise, \
+                    e.src_paper, cs.chunk_id, cs.section_type, cs.snippet, \
+                    e.dst_paper, cd.chunk_id, cd.section_type, cd.snippet \
+             FROM cortex_edges e \
+             JOIN chunks cs ON cs.id = e.src_chunk \
+             JOIN chunks cd ON cd.id = e.dst_chunk",
+        );
+        if kind.is_some() {
+            sql.push_str(" WHERE e.kind = ?1");
+        }
+        sql.push_str(" ORDER BY e.surprise DESC, e.src_chunk, e.dst_chunk LIMIT ");
+        sql.push_str(&limit.to_string());
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let map = |row: &rusqlite::Row<'_>| -> rusqlite::Result<CortexEdgeRow> {
+            Ok(CortexEdgeRow {
+                kind: row.get(0)?,
+                similarity: row.get(1)?,
+                surprise: row.get(2)?,
+                src_paper: row.get(3)?,
+                src_chunk_id: row.get(4)?,
+                src_section: row.get(5)?,
+                src_snippet: row.get(6)?,
+                dst_paper: row.get(7)?,
+                dst_chunk_id: row.get(8)?,
+                dst_section: row.get(9)?,
+                dst_snippet: row.get(10)?,
+            })
+        };
+        let rows = match kind {
+            Some(k) => stmt.query_map([k], map)?.collect::<rusqlite::Result<Vec<_>>>(),
+            None => stmt.query_map([], map)?.collect::<rusqlite::Result<Vec<_>>>(),
+        }?;
+        Ok(rows)
     }
 
     // ---- meta KV (config fingerprints, schema version) ----
@@ -1156,6 +1304,46 @@ mod tests {
         assert!(db.toc_for_paper("p1").unwrap().is_empty());
         assert!(db.vector_ids_filtered(None, None, Some(&["t".to_string()]), None, None).unwrap().is_empty());
         assert_eq!(db.all_vector_ids().unwrap(), vec![keep]);
+    }
+
+    #[test]
+    fn cortex_edges_roundtrip_rank_and_cascade() {
+        let (_dir, db) = open_temp();
+        let a = db.insert_chunk(&new_chunk("p1", SectionType::FutureWork, 0, "a need")).unwrap();
+        let b = db.insert_chunk(&new_chunk("p2", SectionType::Method, 0, "a solution")).unwrap();
+        let c = db.insert_chunk(&new_chunk("p3", SectionType::Method, 0, "another")).unwrap();
+
+        db.insert_cortex_edge(&NewCortexEdge {
+            src_chunk: a, dst_chunk: b, src_paper: "p1".into(), dst_paper: "p2".into(),
+            kind: "need_solution".into(), similarity: 0.61, surprise: 0.61,
+        }).unwrap();
+        db.insert_cortex_edge(&NewCortexEdge {
+            src_chunk: b.min(c), dst_chunk: b.max(c), src_paper: "p2".into(), dst_paper: "p3".into(),
+            kind: "cross_domain".into(), similarity: 0.55, surprise: 0.55,
+        }).unwrap();
+        assert_eq!(db.cortex_edge_count().unwrap(), 2);
+
+        // Ranked by surprise desc; the JOIN hydrates both endpoints.
+        let sparks = db.top_sparks(10, None).unwrap();
+        assert_eq!(sparks.len(), 2);
+        assert_eq!(sparks[0].kind, "need_solution");
+        assert_eq!(sparks[0].src_section, "future_work");
+        assert_eq!(sparks[0].dst_section, "method");
+        assert!(sparks[0].surprise >= sparks[1].surprise);
+
+        // Kind filter.
+        assert_eq!(db.top_sparks(10, Some("cross_domain")).unwrap().len(), 1);
+
+        // Idempotent upsert on the PK.
+        db.insert_cortex_edge(&NewCortexEdge {
+            src_chunk: a, dst_chunk: b, src_paper: "p1".into(), dst_paper: "p2".into(),
+            kind: "need_solution".into(), similarity: 0.70, surprise: 0.70,
+        }).unwrap();
+        assert_eq!(db.cortex_edge_count().unwrap(), 2, "same PK replaces, not duplicates");
+
+        // Removing a paper drops every edge incident to it (either endpoint).
+        db.delete_cortex_edges_for_paper("p2").unwrap();
+        assert_eq!(db.cortex_edge_count().unwrap(), 0, "p2 was an endpoint of both edges");
     }
 
     #[test]

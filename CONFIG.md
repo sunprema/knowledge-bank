@@ -94,10 +94,18 @@ neighbors = 8                       # kNN similarity edges expanded per seed
 damping = 0.5                       # PPR restart strength (lower ⇒ stays local)
 iterations = 15                     # power-iteration steps
 
+[cortex]                            # the associative layer ("brain") — `kb spark`
+enabled = true                      # materialize surprising edges on every ingest
+neighbors = 6                       # cross-paper neighbors examined per chunk
+min_similarity = 0.5                # proximity floor (exact cosine) for any edge
+min_domain_distance = 1.0           # cross-domain gate: 1.0 ⇒ categories fully disjoint
+max_sparks = 50                     # default `kb spark` / web Sparks count
+
 [ingest]
 chunk_max_tokens = 2000
 prefer_latex = true
 pandoc_path = "pandoc"
+classify_with_llm = true            # LLM fallback for headings the keywords miss
 
 [server]
 http_port = 4321                    # HTTP server lands in v0.2
@@ -150,6 +158,42 @@ from the embedding cache). It is **off by default** — when disabled the search
 path is byte-for-byte unchanged. `graph_weight` sets its pull in the fusion
 (peer of `dense_weight`/`lexical_weight`, sharing `rrf_k`); `neighbors` trades
 recall for cost; lower `damping` keeps PPR mass near the seeds.
+
+**Cortex note (the associative layer):** with `[cortex] enabled` (the default),
+every ingest materializes *surprising* connections from the new document's
+chunks to the rest of the corpus and stores them in `meta.db`'s `cortex_edges`
+table. "Surprising" is deliberately not nearest-neighbor similarity (that only
+finds near-duplicates); two signals are scored, both **API-free** (they reuse
+the embedding cache): **need→solution** — a chunk's `future_work`/`limitations`
+sits within `min_similarity` of another chunk's `method`/`experiments`/
+`applications` (a stated need met by a delivered capability, directed) — and
+**cross-domain** — two chunks are close in meaning but their papers' arXiv
+categories are at least `min_domain_distance` apart (`1.0` = fully disjoint),
+i.e. the same idea echoing across fields. Surface them with `kb spark`
+(`--kind need_solution|cross_domain`) or the web app's **Sparks** view. The
+edge store is **derived state** — `kb cortex rebuild` recomputes it from the
+embeddings (cheap; no re-embedding), and `kb reindex` rebuilds it as part of a
+full rebuild. Tune `min_similarity` up if sparks feel loose, and
+`min_domain_distance` down to allow partial-overlap cross-pollination. Set
+`enabled = false` to turn the layer off (and `kb cortex rebuild` then just
+clears it).
+
+**Section classification note:** ingest first strips extraction boilerplate
+from each paper body — ACM CCSXML concept blocks, `\maketitle`/preamble
+leftovers, and markup-only figure lines (`<embed>`/`<img>`/empty `<span>`) —
+so junk text never gets embedded (fenced code is left untouched). It then
+classifies each heading by keyword (deterministic, free). With
+`[ingest] classify_with_llm` (default on), any heading that falls through to
+`other` is sent — *all of a paper's `other` headings in one batched call* — to
+the chat model (`[chat] model`) to be mapped to a real section type. Only that
+otherwise-`other` slice is ever sent (the keyword fast-path is untouched), and
+the call is **best-effort**: no `OPENAI_API_KEY`, an API error, or a malformed
+reply all fall back to `other`. This is the PRD §16 escape hatch, triggered
+because the real corpus's Other ratio blew past the 25% threshold (descriptive
+section titles like "Generative Agent Architecture" carry no keyword). It takes
+effect on `kb reindex`; the embedding cache keeps re-embedding cheap (only
+chunks whose text actually changed are re-embedded). Set
+`classify_with_llm = false` for the pure deterministic classifier.
 
 **Config-change policy (locked design decision):** changing
 `embedding.model`, `dimensions`, or `bit_width` makes existing vectors

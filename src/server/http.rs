@@ -103,6 +103,7 @@ fn router(state: Shared) -> Router {
         .route("/papers/{paper_id}/notes", post(add_note))
         .route("/papers/{paper_id}/similar", get(similar))
         .route("/graph", get(graph))
+        .route("/sparks", get(sparks))
         .route("/search", post(search))
         .route("/chat", post(chat))
         .route("/chunks/{chunk_id}", get(get_chunk))
@@ -440,6 +441,29 @@ async fn graph(
     })
     .await?;
     Ok(Json(resp))
+}
+
+#[derive(Deserialize)]
+struct SparksQuery {
+    limit: Option<usize>,
+    kind: Option<String>,
+}
+
+/// The Cortex associative layer: the most surprising cross-document
+/// connections, most surprising first. Read-only over `meta.db` (no API calls).
+async fn sparks(
+    State(state): State<Shared>,
+    Query(q): Query<SparksQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let limit = q.limit.unwrap_or(0).min(500);
+    let kind = crate::cortex::parse_kind_filter(q.kind.as_deref())?.map(str::to_string);
+    let paths = state.paths.clone();
+    let config = state.config.clone();
+    let list = run_blocking(move || async move {
+        crate::cortex::list_sparks(&paths, &config, limit, kind.as_deref())
+    })
+    .await?;
+    Ok(Json(json!({ "sparks": list })))
 }
 
 #[derive(Deserialize)]
