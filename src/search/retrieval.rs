@@ -5,6 +5,7 @@ use crate::chat::{ChatMessage, OpenAiChat};
 use crate::config::{Config, KbPaths};
 use crate::embed::OpenAiEmbedder;
 use crate::index::{consistency_check, MetaDb, VectorIndex};
+use crate::search::graph_rank;
 use crate::{deep_link, ChunkRecord, DocKind, KbError, PaperMetadata, SectionType};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -255,7 +256,11 @@ pub async fn search(
     dense_scored.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
 
     let hybrid = &config.search.hybrid;
-    let ranked_records: Vec<(ChunkRecord, f32)> = if !hybrid.enabled {
+    let graph_cfg = &config.search.graph;
+    // The fusion path runs when *any* secondary ranker is on. The dense list is
+    // always its base; lexical and graph (PPR) join it when enabled.
+    let use_fusion = hybrid.enabled || graph_cfg.enabled;
+    let ranked_records: Vec<(ChunkRecord, f32)> = if !use_fusion {
         // Dense-only: the blended score is the reported score (== #1).
         dense_scored
             .into_iter()
@@ -263,43 +268,80 @@ pub async fn search(
             .filter_map(|(id, s)| records.remove(&id).map(|rec| (rec, s)))
             .collect()
     } else {
-        // Fuse dense + lexical (BM25) rankings via Reciprocal Rank Fusion.
-        // The dense rank already carries recency/importance, so those signals
-        // survive fusion; BM25 adds the exact-token matches dense embeddings
-        // miss. The reported `score` is the RRF score.
+        // Fuse the dense ranking with lexical (BM25) and/or graph (PPR)
+        // rankings via Reciprocal Rank Fusion. The dense rank already carries
+        // recency/importance, so those signals survive fusion; BM25 adds the
+        // exact-token matches dense embeddings miss; PPR adds the multi-hop
+        // chunks both miss. The reported `score` is the RRF score.
         let dense_rank: HashMap<i64, usize> = dense_scored
             .iter()
             .enumerate()
             .map(|(i, (id, _))| (*id, i))
             .collect();
 
-        // Lexical candidates, restricted to the same filter allowlist so
-        // --section/--tag/--kind/--project/--paper apply uniformly.
         let allow: Option<HashSet<i64>> =
             allowlist.as_ref().map(|v| v.iter().map(|&x| x as i64).collect());
-        let lex_ids: Vec<i64> = db
-            .lexical_search(query, pool_k)?
-            .into_iter()
-            .filter(|id| allow.as_ref().is_none_or(|s| s.contains(id)))
-            .collect();
-        let lex_rank: HashMap<i64, usize> =
-            lex_ids.iter().enumerate().map(|(i, id)| (*id, i)).collect();
 
-        // Hydrate records for lexical-only ids (dense ones are already loaded).
-        let missing: Vec<i64> = lex_ids
-            .iter()
-            .copied()
-            .filter(|id| !records.contains_key(id))
-            .collect();
-        for rec in db.chunks_by_vector_ids(&missing)? {
-            records.insert(rec.vector_id, rec);
-        }
+        // Lexical candidates (only when hybrid is on), restricted to the same
+        // filter allowlist so --section/--tag/--kind/--project/--paper apply
+        // uniformly. Empty when hybrid is off ⇒ contributes nothing to fusion.
+        let lex_rank: HashMap<i64, usize> = if hybrid.enabled {
+            let lex_ids: Vec<i64> = db
+                .lexical_search(query, pool_k)?
+                .into_iter()
+                .filter(|id| allow.as_ref().is_none_or(|s| s.contains(id)))
+                .collect();
+            // Hydrate records for lexical-only ids (dense ones are loaded).
+            let missing: Vec<i64> = lex_ids
+                .iter()
+                .copied()
+                .filter(|id| !records.contains_key(id))
+                .collect();
+            for rec in db.chunks_by_vector_ids(&missing)? {
+                records.insert(rec.vector_id, rec);
+            }
+            lex_ids.iter().enumerate().map(|(i, id)| (*id, i)).collect()
+        } else {
+            HashMap::new()
+        };
+
+        // Graph (PPR) candidates (only when enabled). Seeds are the dense
+        // cosine matches; PPR propagates that relevance across similarity and
+        // explicit-link edges. Discovered neighbor records are merged in.
+        let graph_rank: HashMap<i64, usize> = if graph_cfg.enabled {
+            let seeds: Vec<(i64, f32)> = ordered_ids
+                .iter()
+                .map(|id| (*id, cosine.get(id).copied().unwrap_or(0.0)))
+                .collect();
+            let mut sink: HashMap<i64, ChunkRecord> = HashMap::new();
+            let ppr_ids = graph_rank::ppr_rank(
+                paths,
+                &db,
+                &index,
+                &seeds,
+                &records,
+                allowlist.as_deref(),
+                graph_cfg,
+                &mut sink,
+            )?;
+            for (id, rec) in sink {
+                records.entry(id).or_insert(rec);
+            }
+            ppr_ids.iter().enumerate().map(|(i, id)| (*id, i)).collect()
+        } else {
+            HashMap::new()
+        };
 
         // RRF: Σ weight / (rrf_k + 1-based rank) over the lists a chunk is in.
+        // `rrf_k` is shared across lists; an absent list simply contributes 0.
         let mut fused: Vec<(i64, f32)> = records
             .keys()
             .copied()
-            .filter(|id| dense_rank.contains_key(id) || lex_rank.contains_key(id))
+            .filter(|id| {
+                dense_rank.contains_key(id)
+                    || lex_rank.contains_key(id)
+                    || graph_rank.contains_key(id)
+            })
             .map(|id| {
                 let mut s = 0.0;
                 if let Some(&r) = dense_rank.get(&id) {
@@ -307,6 +349,9 @@ pub async fn search(
                 }
                 if let Some(&r) = lex_rank.get(&id) {
                     s += hybrid.lexical_weight / (hybrid.rrf_k + (r + 1) as f32);
+                }
+                if let Some(&r) = graph_rank.get(&id) {
+                    s += graph_cfg.graph_weight / (hybrid.rrf_k + (r + 1) as f32);
                 }
                 (id, s)
             })

@@ -131,6 +131,15 @@ floor still gates dense candidates first, so it remains a true relevance
 floor. Tune the weights under `[search.ranking]` / `[search.hybrid]`
 (see [CONFIG.md](./CONFIG.md)).
 
+An optional third ranker handles **multi-hop** retrieval. With
+`[search.graph] enabled`, search runs a **Personalized PageRank** pass over a
+chunk similarity graph seeded by the query's dense matches, fused into the same
+RRF — so a chunk relevant *because it links to* relevant material surfaces even
+when its own text shares no tokens with the query. This is HippoRAG's mechanism
+(arXiv:2405.14831, in this corpus), walking the KB's existing similarity and
+`[[id]]` edges instead of an LLM-extracted entity graph — no new index, no extra
+API calls. It's **off by default**; flip it on per-corpus to taste.
+
 ### Capturing ideas
 
 ```bash

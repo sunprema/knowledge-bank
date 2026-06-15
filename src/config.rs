@@ -100,6 +100,7 @@ pub struct SearchConfig {
     pub default_min_score_wide: f32,
     pub ranking: RankingConfig,
     pub hybrid: HybridConfig,
+    pub graph: GraphRankConfig,
 }
 
 impl Default for SearchConfig {
@@ -114,6 +115,7 @@ impl Default for SearchConfig {
             default_min_score_wide: 0.0,
             ranking: RankingConfig::default(),
             hybrid: HybridConfig::default(),
+            graph: GraphRankConfig::default(),
         }
     }
 }
@@ -147,6 +149,53 @@ impl Default for HybridConfig {
             dense_weight: 1.0,
             lexical_weight: 1.0,
             rrf_k: 60.0,
+        }
+    }
+}
+
+/// Graph-propagated retrieval: a Personalized PageRank pass over a chunk
+/// similarity graph, fused into the hybrid RRF as a third ranked list. This is
+/// HippoRAG's retrieval mechanism (arXiv:2405.14831, in this corpus) — seed PPR
+/// from the query's dense matches, let relevance propagate across edges, rank by
+/// the stationary distribution — so a chunk relevant *because it is linked to*
+/// relevant material surfaces even when its own text shares no tokens with the
+/// query (the single-step multi-hop case pure dense + BM25 both miss).
+///
+/// The faithful adaptation: HippoRAG builds its graph from LLM-extracted
+/// entities (an OpenIE indexing pass + a separate store). We instead walk the
+/// graph signal already in the KB — embedding-similarity kNN edges plus the
+/// explicit `[[id]]` / `--link` / `--scope` relations — so PPR needs no new
+/// index and no extra API calls (seed and neighbor vectors come from the
+/// embedding cache). The subgraph is expanded locally around the dense seeds,
+/// where PPR-with-restart concentrates its mass anyway.
+///
+/// Off by default: when `enabled = false` the search path is byte-for-byte
+/// unchanged. The RRF score for a chunk gains a `graph_weight / (rrf_k + rank)`
+/// term (same `rrf_k` as [`HybridConfig`]) for its rank in the PPR list.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GraphRankConfig {
+    /// `false` ⇒ no PPR pass (dense + lexical only, unchanged).
+    pub enabled: bool,
+    /// Weight of the PPR ranked list in the RRF sum (peer of dense/lexical).
+    pub graph_weight: f32,
+    /// kNN similarity edges expanded per seed chunk when building the subgraph.
+    pub neighbors: usize,
+    /// PPR damping (restart probability is `1 - damping`): lower ⇒ mass stays
+    /// nearer the seeds, higher ⇒ relevance propagates further across hops.
+    pub damping: f32,
+    /// Power-iteration steps. ~15 converges the small per-query subgraph.
+    pub iterations: usize,
+}
+
+impl Default for GraphRankConfig {
+    fn default() -> Self {
+        GraphRankConfig {
+            enabled: false,
+            graph_weight: 1.0,
+            neighbors: 8,
+            damping: 0.5,
+            iterations: 15,
         }
     }
 }

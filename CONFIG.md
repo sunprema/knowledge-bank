@@ -87,6 +87,13 @@ dense_weight = 1.0                  # RRF weight for the vector ranking
 lexical_weight = 1.0                # RRF weight for the BM25 ranking
 rrf_k = 60                          # RRF dampening constant (standard: 60)
 
+[search.graph]                      # Personalized-PageRank multi-hop (HippoRAG)
+enabled = false                     # opt-in; off ⇒ search path is unchanged
+graph_weight = 1.0                  # RRF weight for the PPR ranking
+neighbors = 8                       # kNN similarity edges expanded per seed
+damping = 0.5                       # PPR restart strength (lower ⇒ stays local)
+iterations = 15                     # power-iteration steps
+
 [ingest]
 chunk_max_tokens = 2000
 prefer_latex = true
@@ -128,6 +135,21 @@ recency/importance flow through. Because RRF combines *ranks*, the reported
 order, not magnitude. Set `enabled = false` for pure dense behavior. The
 lexical index is built automatically; a KB created before this feature
 backfills it on first open (no `kb reindex` needed).
+
+**Graph note (opt-in):** with `[search.graph] enabled`, search adds a third
+ranked list to the RRF fusion: a **Personalized PageRank** pass over a chunk
+similarity graph grown around the query's dense matches. PPR propagates the
+query's relevance across **kNN similarity edges** and your explicit
+`[[id]]`/`--link`/`--scope` relations, so a chunk relevant *because it links to*
+relevant material surfaces even when its own text shares no tokens with the
+query — the single-step multi-hop case pure dense + BM25 both miss. This is
+HippoRAG's retrieval mechanism (arXiv:2405.14831, also in this corpus), adapted
+to walk the KB's existing edges rather than an LLM-extracted entity graph, so it
+needs no new index and **no extra API calls** (seed and neighbor vectors come
+from the embedding cache). It is **off by default** — when disabled the search
+path is byte-for-byte unchanged. `graph_weight` sets its pull in the fusion
+(peer of `dense_weight`/`lexical_weight`, sharing `rrf_k`); `neighbors` trades
+recall for cost; lower `damping` keeps PPR mass near the seeds.
 
 **Config-change policy (locked design decision):** changing
 `embedding.model`, `dimensions`, or `bit_width` makes existing vectors
