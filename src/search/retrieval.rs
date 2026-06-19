@@ -840,6 +840,322 @@ pub async fn chat(
     Ok(ChatResponse { answer, sources })
 }
 
+/// Co-author assist: search the KB for content related to the draft + message,
+/// then call the chat model with a co-author system prompt that includes both
+/// the current draft and the relevant KB excerpts. Returns the model's text.
+pub async fn compose_assist(
+    paths: &KbPaths,
+    config: &Config,
+    draft: &str,
+    message: &str,
+    history: &[ChatMessage],
+) -> Result<String, KbError> {
+    let message = message.trim();
+    if message.is_empty() {
+        return Err(KbError::Usage("message is empty".into()));
+    }
+
+    // Build a search query from the first 400 chars of the draft + the message.
+    let draft_prefix: String = draft.chars().take(400).collect();
+    let search_query = format!("{draft_prefix} {message}");
+
+    let k = config.chat.max_context_chunks.clamp(1, 12);
+    let res = search(
+        paths,
+        config,
+        &search_query,
+        SearchMode::Wide,
+        Some(k),
+        SearchFilters::default(),
+    )
+    .await?;
+
+    let db = MetaDb::open(&paths.meta_db_path())?;
+    let mut kb_context = String::new();
+    'outer: for g in &res.papers {
+        for c in &g.chunks {
+            let text = db
+                .chunk_by_chunk_id(&c.chunk_id)?
+                .map(|r| r.text)
+                .unwrap_or_else(|| c.snippet.clone());
+            kb_context.push_str(&format!(
+                "From \"{}\": {}\n\n",
+                g.paper.title,
+                text.trim()
+            ));
+            if kb_context.len() > 3000 {
+                break 'outer;
+            }
+        }
+    }
+
+    let kb_section = if !kb_context.is_empty() {
+        format!(
+            "\n\nRelevant excerpts from the user's knowledge base (use these to suggest \
+             connections, supporting evidence, or contrasting views):\n{kb_context}"
+        )
+    } else {
+        String::new()
+    };
+
+    let draft_section = if draft.trim().is_empty() {
+        "(no draft yet — help the user start writing)".to_string()
+    } else {
+        format!("---\n{}\n---", draft.trim())
+    };
+
+    let system = format!(
+        "You are a thoughtful co-author helping the user develop an idea or reflection \
+         for their personal knowledge base. The user's current draft is:\n\n\
+         {draft_section}{kb_section}\n\n\
+         Your role: suggest improvements, expansions, new angles, connections to their KB, \
+         or help restructure the writing. When suggesting text the user can insert, use a \
+         fenced block or quote it clearly so they can easily copy it. Be collaborative, \
+         generative, and concise.",
+    );
+
+    let mut messages = vec![ChatMessage::system(system)];
+    for m in history {
+        if m.is_valid_role() && m.role != "system" {
+            messages.push(m.clone());
+        }
+    }
+    messages.push(ChatMessage::user(message));
+
+    let client = OpenAiChat::from_env(&config.chat.model)?;
+    client.complete(&messages, config.chat.temperature).await
+}
+
+// ===========================================================================
+// Problem hunting (ResearchAgent): bubble up unsolved problems worth a
+// solution. A problem statement lives in a paper's `limitations`/`future_work`
+// section; it becomes a *product opportunity* when the corpus already holds
+// `method`/`applications` work — in OTHER papers — that partially addresses it
+// (a "synthesis opportunity"), or when nothing does (a "greenfield" gap). This
+// reuses the same vector store as search: problem chunks are the seeds, method
+// chunks the targets. One engine fn; both the REST route and the MCP tool wrap
+// it (like search/chat).
+// ===========================================================================
+
+/// A candidate solution chunk paired to a problem: a `method`/`applications`
+/// chunk from a *different* paper, near the problem in embedding space.
+#[derive(Debug, Clone, Serialize)]
+pub struct SolutionHit {
+    pub paper_id: String,
+    pub title: String,
+    pub chunk_id: String,
+    pub section_type: String,
+    pub score: f32,
+    pub snippet: String,
+    pub page: Option<u32>,
+    pub deep_link: String,
+}
+
+/// One unsolved-gap candidate: a problem statement plus the nearest solution
+/// work elsewhere in the corpus. `gap_type` is `"greenfield"` (no corpus chunk
+/// clears the relevance floor) or `"synthesis_opportunity"` (the pieces exist,
+/// unassembled — `solutions` is non-empty).
+#[derive(Debug, Clone, Serialize)]
+pub struct ProblemCandidate {
+    pub problem_chunk_id: String,
+    pub problem_paper_id: String,
+    pub problem_title: String,
+    /// `"limitations"` | `"future_work"`.
+    pub section_type: String,
+    /// Full problem-chunk text (not a snippet) — the agent reasons over it.
+    pub statement: String,
+    pub page: Option<u32>,
+    pub deep_link: String,
+    pub gap_type: &'static str,
+    pub solutions: Vec<SolutionHit>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ProblemsResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub domain: Option<String>,
+    pub problems: Vec<ProblemCandidate>,
+}
+
+/// A solution must clear this cosine floor to count, so `gap_type` carries real
+/// meaning: below it, the nearest method work isn't actually on-topic, so the
+/// problem reads as greenfield rather than "everything matches weakly." Tuned
+/// for cross-section (problem↔method) similarity, which runs lower than
+/// query↔section, so it sits below the narrow-search floor.
+const PROBLEM_SOLUTION_MIN_SCORE: f32 = 0.35;
+/// Distinct solution papers surfaced per problem.
+const PROBLEM_SOLUTIONS_PER: usize = 5;
+
+/// Hunt the corpus for unsolved problems worth building a solution for. Pulls
+/// problem statements (limitations + future_work, papers only), optionally
+/// focused by `domain`, then pairs each with the nearest method/applications
+/// chunks from *other* papers. The MCP tool and `POST /problems` both wrap this.
+pub async fn find_problems(
+    paths: &KbPaths,
+    config: &Config,
+    domain: Option<&str>,
+    k: usize,
+) -> Result<ProblemsResponse, KbError> {
+    // 1. Gather problem statements. The limitations/future_work section types
+    //    are exactly why this is cheap — the "what's unsolved" sections are
+    //    already classified, so we filter to them and rank by the probe.
+    let probe = domain
+        .map(str::trim)
+        .filter(|d| !d.is_empty())
+        .unwrap_or("open problems, unsolved limitations, challenges left for future work");
+    let problem_filters = SearchFilters {
+        section_types: Some(vec![SectionType::Limitations, SectionType::FutureWork]),
+        kind: Some(DocKind::Paper),
+        ..SearchFilters::default()
+    };
+    let problems = search(paths, config, probe, SearchMode::Wide, Some(k), problem_filters).await?;
+
+    // 2. Match each problem to solution work. Open the stores once for the
+    //    sync nearest-neighbor passes (no more API calls — the problem chunks
+    //    are already embedded and cached).
+    let (db, index) = open_stores_for_query(paths, config)?;
+
+    // Allowlist of "solution" chunks: method + applications across all papers.
+    // Passed to turbovec so the nearest-neighbor search only sees solution work.
+    let solution_ids = db.vector_ids_filtered(
+        Some(&[SectionType::Method, SectionType::Applications]),
+        None,
+        None,
+        Some(DocKind::Paper),
+        None,
+    )?;
+    let solution_allow: Vec<u64> = solution_ids.into_iter().map(|i| i as u64).collect();
+
+    // Flatten problem groups to chunk-level, best score first, capped at k.
+    let mut problem_hits: Vec<&ChunkHit> = problems
+        .papers
+        .iter()
+        .flat_map(|g| g.chunks.iter())
+        .collect();
+    problem_hits.sort_by(|a, b| b.score.total_cmp(&a.score));
+    problem_hits.truncate(k);
+
+    let mut titles: HashMap<String, String> = HashMap::new();
+    let mut title_of = |paths: &KbPaths, id: &str| -> String {
+        titles
+            .entry(id.to_string())
+            .or_insert_with(|| {
+                PaperMetadata::load(&paths.metadata_path(id))
+                    .map(|m| m.title)
+                    .unwrap_or_else(|_| placeholder_meta(id).title)
+            })
+            .clone()
+    };
+
+    let mut out: Vec<ProblemCandidate> = Vec::new();
+    for hit in problem_hits {
+        // Hydrate the problem chunk for its full text + cached vector.
+        let Some(rec) = db.chunk_by_chunk_id(&hit.chunk_id)? else {
+            continue;
+        };
+        let solutions = match db.cache_get(
+            &rec.content_hash,
+            &rec.embedding_model,
+            rec.embedding_version,
+        )? {
+            // No cached vector (e.g. after `kb cache clear`): still surface the
+            // problem, just without matched solutions.
+            None => Vec::new(),
+            Some(vec) if solution_allow.is_empty() => {
+                let _ = vec;
+                Vec::new()
+            }
+            Some(vec) => nearest_solutions(
+                &db,
+                &index,
+                &vec,
+                &rec.paper_id,
+                &solution_allow,
+                PROBLEM_SOLUTIONS_PER,
+            )?
+            .into_iter()
+            .map(|(srec, score)| SolutionHit {
+                title: title_of(paths, &srec.paper_id),
+                deep_link: deep_link(
+                    &paths.link_target(&srec.paper_id, srec.section_type),
+                    srec.page,
+                    None,
+                ),
+                paper_id: srec.paper_id,
+                chunk_id: srec.chunk_id,
+                section_type: srec.section_type.as_str().to_string(),
+                score,
+                snippet: srec.snippet,
+                page: srec.page,
+            })
+            .collect(),
+        };
+
+        let gap_type = if solutions.is_empty() {
+            "greenfield"
+        } else {
+            "synthesis_opportunity"
+        };
+        out.push(ProblemCandidate {
+            problem_title: title_of(paths, &rec.paper_id),
+            problem_chunk_id: rec.chunk_id,
+            problem_paper_id: rec.paper_id,
+            section_type: rec.section_type.as_str().to_string(),
+            statement: rec.text,
+            page: rec.page,
+            deep_link: hit.deep_link.clone(),
+            gap_type,
+            solutions,
+        });
+    }
+
+    Ok(ProblemsResponse {
+        domain: domain
+            .map(str::trim)
+            .filter(|d| !d.is_empty())
+            .map(str::to_string),
+        problems: out,
+    })
+}
+
+/// Nearest solution chunks to `query_vec`, restricted to the `allow` set
+/// (method/applications vector ids), one per paper, excluding `exclude_paper`,
+/// above the relevance floor. Ordered by score desc (the index returns ranked,
+/// and `chunks_by_vector_ids` preserves that order).
+fn nearest_solutions(
+    db: &MetaDb,
+    index: &VectorIndex,
+    query_vec: &[f32],
+    exclude_paper: &str,
+    allow: &[u64],
+    limit: usize,
+) -> Result<Vec<(ChunkRecord, f32)>, KbError> {
+    let pool = (limit + 1).saturating_mul(8).clamp(20, 200);
+    let ranked = index.search(query_vec, pool, Some(allow))?;
+    let ordered_ids: Vec<i64> = ranked.iter().map(|(id, _)| *id as i64).collect();
+    let score_of: HashMap<i64, f32> = ranked.iter().map(|(id, s)| (*id as i64, *s)).collect();
+
+    let mut hits: Vec<(ChunkRecord, f32)> = Vec::new();
+    let mut seen_papers: HashSet<String> = HashSet::new();
+    for rec in db.chunks_by_vector_ids(&ordered_ids)? {
+        if rec.paper_id == exclude_paper {
+            continue;
+        }
+        let score = score_of.get(&rec.vector_id).copied().unwrap_or(0.0);
+        if score < PROBLEM_SOLUTION_MIN_SCORE {
+            continue;
+        }
+        if !seen_papers.insert(rec.paper_id.clone()) {
+            continue; // one solution per paper keeps the list diverse
+        }
+        hits.push((rec, score));
+        if hits.len() >= limit {
+            break;
+        }
+    }
+    Ok(hits)
+}
+
 /// Exponential recency term in `(0, 1]` from a chunk's `embedded_at`
 /// timestamp: `1.0` for something embedded now, `0.5` at `half_life_days`,
 /// decaying toward 0. An unparseable or future timestamp is treated as

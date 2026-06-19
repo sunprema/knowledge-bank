@@ -71,6 +71,9 @@ struct MainView: View {
     @Environment(ServerController.self) private var server
     @State private var section: AppSection = .search
     @State private var showKeyOnboarding = false
+    /// Set by the Problems view to seed a roundtable objective; consumed (and
+    /// cleared) by the Roundtable view on appear.
+    @State private var roundtableSeed: String?
 
     var body: some View {
         NavigationSplitView {
@@ -84,6 +87,12 @@ struct MainView: View {
                 case .graph:   GraphView(client: client)
                 case .chat:    ChatView(client: client)
                 case .sparks:  SparksView(client: client)
+                case .problems:
+                    ProblemsView(client: client, onBrainstorm: { objective in
+                        roundtableSeed = objective
+                        section = .roundtable
+                    })
+                case .roundtable: RoundtableView(client: client, seed: $roundtableSeed)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -104,7 +113,7 @@ struct MainView: View {
 }
 
 enum AppSection: String, CaseIterable, Identifiable {
-    case search, library, graph, chat, sparks
+    case search, library, graph, chat, sparks, problems, roundtable
     var id: String { rawValue }
     var title: String {
         switch self {
@@ -113,6 +122,8 @@ enum AppSection: String, CaseIterable, Identifiable {
         case .graph: "Graph"
         case .chat: "Chat"
         case .sparks: "Sparks"
+        case .problems: "Problems"
+        case .roundtable: "Roundtable"
         }
     }
     var icon: String {
@@ -122,6 +133,8 @@ enum AppSection: String, CaseIterable, Identifiable {
         case .graph: "point.3.connected.trianglepath.dotted"
         case .chat: "bubble.left.and.bubble.right"
         case .sparks: "sparkles"
+        case .problems: "lightbulb.max"
+        case .roundtable: "person.3.sequence"
         }
     }
     var subtitle: String {
@@ -131,6 +144,8 @@ enum AppSection: String, CaseIterable, Identifiable {
         case .graph: "Explore connections visually"
         case .chat: "Ask questions over everything"
         case .sparks: "Surprising connections"
+        case .problems: "Unsolved gaps worth building"
+        case .roundtable: "Agents brainstorm your idea"
         }
     }
 }

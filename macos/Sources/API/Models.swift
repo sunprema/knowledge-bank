@@ -122,6 +122,40 @@ struct ChatSource: Codable, Identifiable {
     var id: Int { n }
 }
 
+// MARK: - Problems (ResearchAgent)
+
+struct ProblemsResponse: Codable {
+    var domain: String?
+    var problems: [ProblemCandidate] = []
+}
+
+struct ProblemCandidate: Codable, Identifiable {
+    let problemChunkId: String
+    let problemPaperId: String
+    let problemTitle: String
+    let sectionType: String       // "limitations" | "future_work"
+    let statement: String
+    var page: Int?
+    var deepLink: String = ""
+    let gapType: String           // "greenfield" | "synthesis_opportunity"
+    var solutions: [SolutionHit] = []
+
+    var id: String { problemChunkId }
+}
+
+struct SolutionHit: Codable, Identifiable {
+    let paperId: String
+    let title: String
+    let chunkId: String
+    let sectionType: String
+    let score: Float
+    var snippet: String = ""
+    var page: Int?
+    var deepLink: String = ""
+
+    var id: String { chunkId }
+}
+
 // MARK: - Similar
 
 struct SimilarResponse: Codable {

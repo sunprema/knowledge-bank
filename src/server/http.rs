@@ -15,13 +15,19 @@ use axum::{
     extract::{Path, Query, Request, State},
     http::{HeaderValue, StatusCode, header},
     middleware::{self, Next},
-    response::{Html, IntoResponse, Response},
+    response::{
+        Html, IntoResponse, Response,
+        sse::{Event, KeepAlive, Sse},
+    },
     routing::{get, post},
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
+use tokio_stream::{StreamExt, wrappers::ReceiverStream};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
+use crate::agents::roundtable::{self, BrainstormRequest};
+use crate::chat::ChatMessage;
 use crate::config::{Config, KbPaths};
 use crate::index::MetaDb;
 use crate::ingest::pipeline;
@@ -32,6 +38,9 @@ struct AppState {
     paths: KbPaths,
     config: Config,
     api_key: String,
+    /// Live roundtables, keyed by client session id → interjection sender. Lets
+    /// `POST /brainstorm/{id}/interject` push guidance into a running debate.
+    roundtables: std::sync::Mutex<std::collections::HashMap<String, tokio::sync::mpsc::Sender<String>>>,
 }
 
 type Shared = Arc<AppState>;
@@ -66,6 +75,7 @@ pub async fn run(paths: KbPaths, config: Config, port: u16) -> Result<(), KbErro
         paths,
         config,
         api_key,
+        roundtables: std::sync::Mutex::new(std::collections::HashMap::new()),
     });
 
     let app = router(state.clone());
@@ -100,12 +110,18 @@ fn router(state: Shared) -> Router {
         .route("/stats", get(stats))
         .route("/papers", get(list_papers))
         .route("/papers/{paper_id}", get(get_paper))
-        .route("/papers/{paper_id}/notes", post(add_note))
+        .route("/papers/{paper_id}/notes", post(add_note).put(put_notes))
         .route("/papers/{paper_id}/similar", get(similar))
         .route("/graph", get(graph))
         .route("/sparks", get(sparks))
         .route("/search", post(search))
+        .route("/problems", post(problems))
         .route("/chat", post(chat))
+        .route("/brainstorm", post(brainstorm))
+        .route("/brainstorm/{session_id}/interject", post(interject))
+        .route("/ideas", post(create_idea))
+        .route("/reflections", post(create_reflection))
+        .route("/compose/assist", post(compose_assist))
         .route("/chunks/{chunk_id}", get(get_chunk))
         .route("/pdf/{paper_id}", get(get_pdf))
         .route("/open/{chunk_id}", get(open_chunk))
@@ -400,6 +416,32 @@ async fn search(
 }
 
 #[derive(Deserialize)]
+struct ProblemsRequest {
+    /// Optional topic to focus the hunt; omitted = scan broadly.
+    domain: Option<String>,
+    k: Option<usize>,
+}
+
+/// Problem hunting (ResearchAgent): surface unsolved problems (papers'
+/// limitations/future_work) paired with the nearest method/applications work
+/// elsewhere in the corpus. Embeds across `.await` while holding the stores, so
+/// it runs on a blocking thread (same as `/search`).
+async fn problems(
+    State(state): State<Shared>,
+    Json(req): Json<ProblemsRequest>,
+) -> Result<Json<retrieval::ProblemsResponse>, ApiError> {
+    let k = req.k.unwrap_or(8).clamp(1, 30);
+    let paths = state.paths.clone();
+    let config = state.config.clone();
+    let domain = req.domain;
+    let resp = run_blocking(move || async move {
+        retrieval::find_problems(&paths, &config, domain.as_deref(), k).await
+    })
+    .await?;
+    Ok(Json(resp))
+}
+
+#[derive(Deserialize)]
 struct SimilarQuery {
     limit: Option<usize>,
 }
@@ -470,7 +512,7 @@ async fn sparks(
 struct ChatRequest {
     query: String,
     #[serde(default)]
-    history: Vec<crate::chat::ChatMessage>,
+    history: Vec<ChatMessage>,
 }
 
 /// Chat-over-corpus: wide-retrieve context, answer with the chat model, return
@@ -487,6 +529,162 @@ async fn chat(
     })
     .await?;
     Ok(Json(resp))
+}
+
+/// Brainstorming roundtable (multi-agent): a panel of specialist agents debates
+/// the objective across rounds — grounded in the corpus — streamed live as SSE.
+/// Each SSE event's data is one JSON `RoundtableEvent` (`type`-tagged), so the
+/// client renders turns as they arrive. The orchestrator runs in a spawned task
+/// and pushes events over a channel; this handler just streams the channel.
+///
+/// Requires the API key for whichever providers the panel's models use
+/// (`OPENAI_API_KEY` and/or `ANTHROPIC_API_KEY`); a missing key surfaces as an
+/// `error` event, not a failed request.
+async fn brainstorm(
+    State(state): State<Shared>,
+    Json(req): Json<BrainstormRequest>,
+) -> impl IntoResponse {
+    let (tx, rx) = tokio::sync::mpsc::channel::<roundtable::RoundtableEvent>(32);
+    // Side-channel for live interjections; registered under the client's session
+    // id so `POST /brainstorm/{id}/interject` can reach this run.
+    let (itx, irx) = tokio::sync::mpsc::channel::<String>(16);
+    let session_id = req.session_id.clone();
+    if let Some(ref sid) = session_id {
+        if let Ok(mut map) = state.roundtables.lock() {
+            map.insert(sid.clone(), itx);
+        }
+    }
+
+    let st = state.clone();
+    tokio::spawn(async move {
+        roundtable::run(&st.paths, &st.config, req, irx, tx).await;
+        // The run is over — drop the interjection sender so a stale id can't
+        // accumulate. (Steering after this point is a no-op.)
+        if let Some(sid) = session_id {
+            if let Ok(mut map) = st.roundtables.lock() {
+                map.remove(&sid);
+            }
+        }
+    });
+
+    let stream = ReceiverStream::new(rx).map(|ev| {
+        Event::default()
+            .json_data(&ev)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+    });
+    Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+#[derive(Deserialize)]
+struct InterjectRequest {
+    text: String,
+}
+
+/// Push a guiding idea into a running roundtable. The orchestrator drains it
+/// before the next agent speaks. 404 if the session isn't live (finished or
+/// never started); 202 once queued.
+async fn interject(
+    State(state): State<Shared>,
+    Path(session_id): Path<String>,
+    Json(req): Json<InterjectRequest>,
+) -> StatusCode {
+    let sender = state
+        .roundtables
+        .lock()
+        .ok()
+        .and_then(|map| map.get(&session_id).cloned());
+    match sender {
+        Some(tx) => {
+            // Clone the sender out before awaiting so we never hold the lock
+            // across the send.
+            let _ = tx.send(req.text).await;
+            StatusCode::ACCEPTED
+        }
+        None => StatusCode::NOT_FOUND,
+    }
+}
+
+#[derive(Deserialize)]
+struct CreateIdeaRequest {
+    title: String,
+    body: String,
+    project: Option<String>,
+    #[serde(default)]
+    tags: Vec<String>,
+    #[serde(default)]
+    links: Vec<String>,
+}
+
+async fn create_idea(
+    State(state): State<Shared>,
+    Json(req): Json<CreateIdeaRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let paths = state.paths.clone();
+    let config = state.config.clone();
+    let report = run_blocking(move || async move {
+        let spec = pipeline::IdeaSpec {
+            slug: None,
+            project: req.project.unwrap_or_else(|| "global".into()),
+            title: req.title,
+            body: req.body,
+            tags: req.tags,
+            links: req.links,
+        };
+        pipeline::ingest_idea(&paths, &config, &spec, &|_| {}).await
+    })
+    .await?;
+    Ok(Json(json!({ "ok": true, "id": report.paper_id, "chunks": report.chunks })))
+}
+
+#[derive(Deserialize)]
+struct CreateReflectionRequest {
+    title: String,
+    body: String,
+    #[serde(default)]
+    scope: Vec<String>,
+    #[serde(default)]
+    tags: Vec<String>,
+}
+
+async fn create_reflection(
+    State(state): State<Shared>,
+    Json(req): Json<CreateReflectionRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let paths = state.paths.clone();
+    let config = state.config.clone();
+    let report = run_blocking(move || async move {
+        let spec = pipeline::ReflectionSpec {
+            slug: None,
+            title: req.title,
+            body: req.body,
+            scope: req.scope,
+            tags: req.tags,
+        };
+        pipeline::ingest_reflection(&paths, &config, &spec, &|_| {}).await
+    })
+    .await?;
+    Ok(Json(json!({ "ok": true, "id": report.paper_id, "chunks": report.chunks })))
+}
+
+#[derive(Deserialize)]
+struct ComposeAssistRequest {
+    draft: String,
+    message: String,
+    #[serde(default)]
+    history: Vec<ChatMessage>,
+}
+
+async fn compose_assist(
+    State(state): State<Shared>,
+    Json(req): Json<ComposeAssistRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let paths = state.paths.clone();
+    let config = state.config.clone();
+    let answer = run_blocking(move || async move {
+        retrieval::compose_assist(&paths, &config, &req.draft, &req.message, &req.history).await
+    })
+    .await?;
+    Ok(Json(json!({ "answer": answer })))
 }
 
 #[derive(Deserialize)]
@@ -524,6 +722,36 @@ async fn add_note(
             Ok(()) => format!("note appended to {paper_id} and re-embedded"),
             Err(e) => format!(
                 "note appended to {paper_id}; re-embedding deferred ({e}) — a running `kb watch` or `kb reindex` will pick it up"
+            ),
+        })
+    })
+    .await?;
+    Ok(Json(json!({ "ok": true, "message": message })))
+}
+
+/// Overwrite a paper's `notes.md` wholesale and re-embed (the editable-notes
+/// editor). Unlike `add_note` (append-only), this replaces the file with the
+/// supplied content — the canonical, hand-editable note body.
+async fn put_notes(
+    State(state): State<Shared>,
+    Path(paper_id): Path<String>,
+    Json(req): Json<NoteRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let paths = state.paths.clone();
+    let config = state.config.clone();
+    let body = req.note;
+    let message = run_blocking(move || async move {
+        let meta_path = paths.metadata_path(&paper_id);
+        if !meta_path.exists() {
+            return Err(KbError::NotFound(format!("{paper_id} is not in the KB")));
+        }
+        std::fs::write(paths.notes_path(&paper_id), body.as_bytes())
+            .map_err(|e| KbError::Index(format!("write notes.md: {e}")))?;
+
+        Ok(match pipeline::reembed_notes(&paths, &config, &paper_id).await {
+            Ok(()) => format!("notes saved to {paper_id} and re-embedded"),
+            Err(e) => format!(
+                "notes saved to {paper_id}; re-embedding deferred ({e}) — a running `kb watch` or `kb reindex` will pick it up"
             ),
         })
     })

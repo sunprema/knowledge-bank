@@ -12,6 +12,10 @@ struct SettingsView: View {
                 APIKeyForm()
                     .padding(.vertical, 4)
             }
+            Section("Anthropic (Roundtable)") {
+                AnthropicKeyForm()
+                    .padding(.vertical, 4)
+            }
             Section("Knowledge Bank") {
                 LabeledContent("Folder") {
                     HStack(spacing: 8) {
@@ -36,7 +40,7 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 540, height: 340)
+        .frame(width: 540, height: 480)
         .fileImporter(isPresented: $picking, allowedContentTypes: [.folder]) { result in
             if case .success(let url) = result { server.setKBRoot(url) }
         }

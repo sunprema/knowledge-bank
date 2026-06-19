@@ -23,18 +23,32 @@ final class ServerController {
 
     /// Keychain account holding the user's OpenAI key.
     static let openAIAccount = "openai_api_key"
+    /// Keychain account holding the user's Anthropic key (optional — only the
+    /// Roundtable's Claude agents need it).
+    static let anthropicAccount = "anthropic_api_key"
 
     /// Whether search/chat/sparks can work — i.e. an OpenAI key is available
     /// (from the parent env, or stored in the Keychain). Drives onboarding UI.
     private(set) var hasOpenAIKey = false
+    /// Whether Claude-backed roundtable agents can run (Anthropic key present).
+    private(set) var hasAnthropicKey = false
 
     /// Resolution order for the embedding key: parent process env (dev
     /// convenience) wins, else the Keychain.
     private func resolveOpenAIKey() -> String? {
-        if let env = ProcessInfo.processInfo.environment["OPENAI_API_KEY"], !env.isEmpty {
+        resolveKey("OPENAI_API_KEY", account: Self.openAIAccount)
+    }
+
+    private func resolveAnthropicKey() -> String? {
+        resolveKey("ANTHROPIC_API_KEY", account: Self.anthropicAccount)
+    }
+
+    /// Env (dev convenience) wins, else the Keychain.
+    private func resolveKey(_ envVar: String, account: String) -> String? {
+        if let env = ProcessInfo.processInfo.environment[envVar], !env.isEmpty {
             return env
         }
-        if let stored = Keychain.get(Self.openAIAccount), !stored.isEmpty {
+        if let stored = Keychain.get(account), !stored.isEmpty {
             return stored
         }
         return nil
@@ -51,6 +65,19 @@ final class ServerController {
 
     func clearOpenAIKey() {
         Keychain.delete(Self.openAIAccount)
+        restart()
+    }
+
+    /// Store the Anthropic key and restart so the engine sees it at spawn time.
+    func setAnthropicKey(_ key: String) {
+        let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        Keychain.set(trimmed, account: Self.anthropicAccount)
+        restart()
+    }
+
+    func clearAnthropicKey() {
+        Keychain.delete(Self.anthropicAccount)
         restart()
     }
 
@@ -123,6 +150,9 @@ final class ServerController {
         let openAI = resolveOpenAIKey()
         hasOpenAIKey = (openAI != nil)
         if let openAI { env["OPENAI_API_KEY"] = openAI }
+        let anthropic = resolveAnthropicKey()
+        hasAnthropicKey = (anthropic != nil)
+        if let anthropic { env["ANTHROPIC_API_KEY"] = anthropic }
         proc.environment = env
 
         // Funnel engine stderr/stdout to a log file for diagnostics.
