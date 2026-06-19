@@ -8,6 +8,11 @@ struct ChatTurn: Identifiable, Codable {
     let role: Role
     let text: String
     var sources: [ChatSource] = []
+    // Attribution when a persona answered (the `@persona` chat mode). Optional so
+    // conversations saved before personas existed still decode (missing ⇒ nil).
+    var personaName: String? = nil
+    var personaIcon: String? = nil
+    var personaColorName: String? = nil
 }
 
 // One saved conversation: its turns plus metadata for the history list.
