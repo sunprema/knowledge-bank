@@ -8,7 +8,7 @@ use crate::index::{consistency_check, MetaDb, VectorIndex};
 use crate::search::graph_rank;
 use crate::{deep_link, ChunkRecord, DocKind, KbError, PaperMetadata, SectionType};
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
 
@@ -750,11 +750,36 @@ pub fn knowledge_graph(
 /// Wide-retrieves a context pool, feeds the numbered chunks to the chat model,
 /// and returns the answer plus the cited sources (each deep-linkable to its
 /// PDF page). `history` carries prior turns for follow-ups.
+/// A persona addressed in chat (the `@persona` mode). Its `prompt` becomes the
+/// system prompt and its `model` produces the reply; `tools` grants live
+/// read-only corpus tools on Claude models. All fields optional so the client
+/// can send a partial spec (and so absence ⇒ the default research-assistant chat).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct PersonaChat {
+    #[serde(default)]
+    pub prompt: String,
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub tools: bool,
+    #[serde(default)]
+    pub queries_kb: bool,
+}
+
+/// The default research-assistant system prompt used when no persona is addressed.
+const DEFAULT_CHAT_SYSTEM: &str =
+    "You are a research assistant answering questions over the user's personal \
+     knowledge base of papers, ideas, and reflections. Answer ONLY from the numbered sources \
+     provided. Cite the sources you use inline with their bracketed numbers, e.g. [1] or \
+     [2][3]. Be concise and precise. If the sources don't contain enough to answer, say so \
+     plainly rather than guessing.";
+
 pub async fn chat(
     paths: &KbPaths,
     config: &Config,
     query: &str,
     history: &[ChatMessage],
+    persona: Option<&PersonaChat>,
 ) -> Result<ChatResponse, KbError> {
     let query = query.trim();
     if query.is_empty() {
@@ -819,11 +844,18 @@ pub async fn chat(
         });
     }
 
-    let system = "You are a research assistant answering questions over the user's personal \
-        knowledge base of papers, ideas, and reflections. Answer ONLY from the numbered sources \
-        provided. Cite the sources you use inline with their bracketed numbers, e.g. [1] or \
-        [2][3]. Be concise and precise. If the sources don't contain enough to answer, say so \
-        plainly rather than guessing.";
+    // System prompt: a persona's instructions (when addressed) lead, followed by
+    // the corpus-grounding rules; otherwise the default research assistant.
+    let system = match persona {
+        Some(p) if !p.prompt.trim().is_empty() => format!(
+            "{}\n\nYou are answering over the user's personal knowledge base. Ground your \
+             answer in the numbered sources provided and cite the ones you use inline with \
+             bracketed numbers, e.g. [1] or [2][3]. If the sources don't cover something, say so \
+             plainly rather than inventing citations — but stay in character.",
+            p.prompt.trim(),
+        ),
+        _ => DEFAULT_CHAT_SYSTEM.to_string(),
+    };
 
     let mut messages = vec![ChatMessage::system(system)];
     // Carry prior turns (drop any client-supplied system role).
@@ -834,8 +866,27 @@ pub async fn chat(
     }
     messages.push(ChatMessage::user(format!("Question: {query}\n\nSources:\n{context}")));
 
-    let client = OpenAiChat::from_env(&config.chat.model)?;
-    let answer = client.complete(&messages, config.chat.temperature).await?;
+    // Route to the persona's model when addressed (Claude → Anthropic, optionally
+    // with live read-only corpus tools; otherwise OpenAI), else the default chat
+    // model with its configured temperature.
+    let answer = match persona {
+        Some(p) => {
+            let model = if p.model.trim().is_empty() {
+                config.chat.model.clone()
+            } else {
+                p.model.clone()
+            };
+            if p.tools && model.starts_with("claude") {
+                crate::agents::roundtable::complete_tooled(paths, config, &model, &messages).await?
+            } else {
+                crate::agents::roundtable::complete(&model, &messages).await?
+            }
+        }
+        None => {
+            let client = OpenAiChat::from_env(&config.chat.model)?;
+            client.complete(&messages, config.chat.temperature).await?
+        }
+    };
 
     Ok(ChatResponse { answer, sources })
 }

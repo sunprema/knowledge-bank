@@ -9,11 +9,12 @@ struct RoundtableView: View {
     let client: KBClient
     /// Objective seeded from another view (e.g. a Problems "Brainstorm" action).
     @Binding var seed: String?
+    /// Switch the app to the Personas section to author the library.
+    var onManagePersonas: () -> Void = {}
 
+    @Environment(PersonaStore.self) private var personaStore
     @State private var workspace = RoundtableWorkspace()
-    @State private var personaStore = PersonaStore()
     @State private var showHistory = false
-    @State private var showPersonas = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -28,13 +29,12 @@ struct RoundtableView: View {
                     Image(systemName: "plus.rectangle")
                 }
                 .help("New debate tab")
-                Button { showPersonas = true } label: { Image(systemName: "person.2.badge.gearshape") }
-                    .help("Edit the panel of agents")
+                Button { onManagePersonas() } label: { Image(systemName: "person.2.badge.gearshape") }
+                    .help("Manage personas")
                 Button { showHistory = true } label: { Image(systemName: "clock.arrow.circlepath") }
                     .help("Research history")
             }
         }
-        .sheet(isPresented: $showPersonas) { personasSheet }
         .sheet(isPresented: $showHistory) {
             RoundtableHistoryView(currentId: workspace.selected?.session.recordId ?? UUID(),
                                   onOpen: { record in workspace.openRecord(record); showHistory = false },
@@ -48,31 +48,17 @@ struct RoundtableView: View {
         if workspace.isSplit, let left = workspace.selected, let right = workspace.splitTab {
             HSplitView {
                 DebateView(tab: left, store: personaStore, client: client,
-                           onEditPersonas: { showPersonas = true })
+                           onManagePersonas: onManagePersonas)
                     .id(left.id).frame(minWidth: 380)
                 DebateView(tab: right, store: personaStore, client: client,
-                           onEditPersonas: { showPersonas = true })
+                           onManagePersonas: onManagePersonas)
                     .id(right.id).frame(minWidth: 380)
             }
         } else if let sel = workspace.selected {
             DebateView(tab: sel, store: personaStore, client: client,
-                       onEditPersonas: { showPersonas = true })
+                       onManagePersonas: onManagePersonas)
                 .id(sel.id)
         }
-    }
-
-    private var personasSheet: some View {
-        VStack(spacing: 0) {
-            HStack {
-                Label("Panel of agents", systemImage: "person.3").font(.headline)
-                Spacer()
-                Button("Done") { showPersonas = false }.keyboardShortcut(.defaultAction)
-            }
-            .padding(.horizontal, 16).padding(.vertical, 12).background(.bar)
-            Divider()
-            PersonasTab(store: personaStore)
-        }
-        .frame(width: 800, height: 660)
     }
 
     /// Apply an objective seeded from elsewhere: reuse the selected tab if it's
@@ -95,16 +81,23 @@ private struct DebateView: View {
     @Bindable var tab: DebateTab
     @Bindable var store: PersonaStore
     let client: KBClient
-    let onEditPersonas: () -> Void
+    let onManagePersonas: () -> Void
 
     @State private var idea = ""
     @State private var showLog = true
 
     private var session: RoundtableSession { tab.session }
 
+    /// The personas chosen for this debate (empty selection ⇒ the whole library).
+    private var chosenPersonas: [Persona] {
+        tab.selectedPersonaIds.isEmpty
+            ? store.personas
+            : store.personas.filter { tab.selectedPersonaIds.contains($0.id) }
+    }
+
     var body: some View {
         if session.phase == .idle {
-            SetupView(tab: tab, store: store, goToPersonas: onEditPersonas, onStart: startDebate)
+            SetupView(tab: tab, store: store, goToPersonas: onManagePersonas, onStart: startDebate)
         } else {
             liveLayout
         }
@@ -112,7 +105,7 @@ private struct DebateView: View {
 
     private func startDebate() {
         session.objective = tab.objective
-        session.personas = store.personas
+        session.personas = chosenPersonas
         session.rounds = tab.rounds
         session.scoreEnabled = tab.scoreEnabled
         session.convergeEnabled = tab.convergeEnabled
@@ -383,12 +376,19 @@ private struct SetupView: View {
 
     @Environment(ServerController.self) private var server
 
+    /// Personas chosen for this debate (empty selection ⇒ the whole library).
+    private var chosen: [Persona] {
+        tab.selectedPersonaIds.isEmpty
+            ? store.personas
+            : store.personas.filter { tab.selectedPersonaIds.contains($0.id) }
+    }
     private var needsAnthropicKey: Bool {
-        !server.hasAnthropicKey && store.personas.contains { $0.model.provider == .anthropic }
+        !server.hasAnthropicKey && chosen.contains { $0.model.provider == .anthropic }
     }
     private var needsOpenAIKey: Bool {
-        !server.hasOpenAIKey && store.personas.contains { $0.model.provider == .openai }
+        !server.hasOpenAIKey && chosen.contains { $0.model.provider == .openai }
     }
+    private var noSynthesizer: Bool { !chosen.contains { $0.isSynth } }
 
     var body: some View {
         ScrollView {
@@ -396,6 +396,7 @@ private struct SetupView: View {
                 header
                 objectiveField
                 roster
+                if noSynthesizer && !chosen.isEmpty { synthWarning }
                 roundsField
                 if needsAnthropicKey || needsOpenAIKey { keyWarning }
                 Button(action: onStart) {
@@ -403,12 +404,27 @@ private struct SetupView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
-                .disabled(tab.objective.trimmingCharacters(in: .whitespaces).isEmpty)
+                .disabled(tab.objective.trimmingCharacters(in: .whitespaces).isEmpty || chosen.isEmpty)
             }
             .padding(32)
             .frame(maxWidth: 720)
             .frame(maxWidth: .infinity)
         }
+        .onAppear {
+            // Default the table to the whole library the first time this tab opens.
+            if tab.selectedPersonaIds.isEmpty {
+                tab.selectedPersonaIds = Set(store.personas.map(\.id))
+            }
+        }
+    }
+
+    private var synthWarning: some View {
+        Label("No synthesizer selected — the debate won't get a final synthesis. Include a persona with the Synthesizer role.",
+              systemImage: "exclamationmark.triangle.fill")
+            .font(.caption).foregroundStyle(.orange)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(10)
+            .background(.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: Theme.corner))
     }
 
     private var header: some View {
@@ -442,12 +458,24 @@ private struct SetupView: View {
             VStack(alignment: .leading, spacing: 12) {
                 HStack {
                     Label("The panel", systemImage: "person.3").font(.subheadline.weight(.semibold))
+                    Text("\(chosen.count) of \(store.personas.count)")
+                        .font(.caption.monospacedDigit()).foregroundStyle(.tertiary)
                     Spacer()
-                    Button { goToPersonas() } label: { Label("Edit", systemImage: "slider.horizontal.3") }
+                    Button { goToPersonas() } label: { Label("Manage personas", systemImage: "slider.horizontal.3") }
                         .font(.caption)
                 }
+                Text("Pick who sits at the table for this debate.")
+                    .font(.caption).foregroundStyle(.secondary)
+                if store.personas.isEmpty {
+                    Text("No personas yet — create some in the Personas section.")
+                        .font(.callout).foregroundStyle(.tertiary).padding(.vertical, 6)
+                }
                 ForEach(store.personas) { persona in
+                    let isOn = tab.selectedPersonaIds.contains(persona.id)
                     HStack(spacing: 12) {
+                        Image(systemName: isOn ? "checkmark.circle.fill" : "circle")
+                            .foregroundStyle(isOn ? Color.accentColor : .secondary)
+                            .font(.title3)
                         ZStack {
                             Circle().fill(persona.color.opacity(0.18)).frame(width: 34, height: 34)
                             Image(systemName: persona.icon).foregroundStyle(persona.color)
@@ -467,8 +495,20 @@ private struct SetupView: View {
                             Text(persona.model.label).font(.caption2).foregroundStyle(.secondary)
                         }
                     }
+                    .padding(.vertical, 3)
+                    .contentShape(Rectangle())
+                    .onTapGesture { toggle(persona.id) }
+                    .opacity(isOn ? 1 : 0.55)
                 }
             }
+        }
+    }
+
+    private func toggle(_ id: String) {
+        if tab.selectedPersonaIds.contains(id) {
+            tab.selectedPersonaIds.remove(id)
+        } else {
+            tab.selectedPersonaIds.insert(id)
         }
     }
 

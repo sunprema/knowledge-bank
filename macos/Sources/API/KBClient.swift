@@ -57,8 +57,21 @@ struct KBClient: Sendable {
         return try await post("/problems", json: body)
     }
 
-    func chat(_ query: String, history: [ChatMessage]) async throws -> ChatResponse {
-        try await post("/chat", json: ["query": query, "history": history.map { ["role": $0.role, "content": $0.content] }])
+    /// Chat over the corpus. When `persona` is supplied, the engine answers in
+    /// that persona's voice on its model (with its tool/KB settings) — the
+    /// `@persona` chat mode — otherwise the default research-assistant chat.
+    func chat(_ query: String, history: [ChatMessage], persona: Persona? = nil) async throws -> ChatResponse {
+        var body: [String: Any] = [
+            "query": query,
+            "history": history.map { ["role": $0.role, "content": $0.content] },
+        ]
+        if let p = persona {
+            body["persona"] = [
+                "prompt": p.prompt, "model": p.modelId,
+                "tools": p.tools, "queries_kb": p.queriesKB,
+            ]
+        }
+        return try await post("/chat", json: body)
     }
 
     /// Append a note to a paper (the engine re-embeds it, making it searchable).

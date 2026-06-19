@@ -9,8 +9,10 @@ struct ChatView: View {
     @State private var turns: [ChatTurn] = []
     @State private var draft = ""
     @State private var sending = false
+    @FocusState private var composerFocused: Bool
     @Environment(SpeechController.self) private var speech
     @Environment(ServerController.self) private var server
+    @Environment(PersonaStore.self) private var personaStore
 
     // The conversation currently in the transcript. Persisted (under this id)
     // after every exchange so it can be resumed from History later.
@@ -168,25 +170,84 @@ struct ChatView: View {
     }
 
     private var composer: some View {
-        HStack(spacing: 10) {
-            TextField("Ask anything about your papers…", text: $draft, axis: .vertical)
-                .textFieldStyle(.plain)
-                .lineLimit(1...5)
-                .padding(10)
-                .background(.background.secondary, in: RoundedRectangle(cornerRadius: Theme.corner))
-                .onSubmit { send() }
-            Button { send() } label: {
-                Image(systemName: "arrow.up.circle.fill").font(.title)
+        VStack(spacing: 0) {
+            if let mention = activeMention, !mentionMatches(mention.query).isEmpty {
+                mentionMenu(mention)
+                Divider()
             }
-            .buttonStyle(.borderless)
-            .disabled(sending || draft.trimmingCharacters(in: .whitespaces).isEmpty)
+            HStack(spacing: 10) {
+                TextField(addressedPersona == nil
+                          ? "Ask anything — type @ to address a persona…"
+                          : "Asking \(addressedPersona!.name)…", text: $draft, axis: .vertical)
+                    .textFieldStyle(.plain)
+                    .lineLimit(1...5)
+                    .focused($composerFocused)
+                    .padding(10)
+                    .background(.background.secondary, in: RoundedRectangle(cornerRadius: Theme.corner))
+                    .onSubmit { send() }
+                Button { send() } label: {
+                    Image(systemName: "arrow.up.circle.fill").font(.title)
+                }
+                .buttonStyle(.borderless)
+                .disabled(sending || draft.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+            .padding(12)
         }
-        .padding(12)
+    }
+
+    // MARK: @persona mention autocomplete (mirrors the Roundtable composer)
+
+    /// The persona currently addressed by an `@mention` in the draft, if any.
+    private var addressedPersona: Persona? {
+        let ids = RoundtableSession.parseMentions(draft, personas: personaStore.personas)
+        return ids.first.flatMap { id in personaStore.personas.first { $0.id == id } }
+    }
+
+    /// The in-progress `@mention` at the end of the draft (range + typed fragment).
+    private var activeMention: (range: Range<String.Index>, query: String)? {
+        guard let at = draft.range(of: "@", options: .backwards) else { return nil }
+        let after = draft[at.upperBound...]
+        if after.contains(where: { $0 == " " || $0 == "\n" || $0 == "\t" }) { return nil }
+        return (at.lowerBound..<draft.endIndex, String(after))
+    }
+
+    private func mentionMatches(_ query: String) -> [Persona] {
+        let q = query.lowercased()
+        return personaStore.personas.filter { q.isEmpty || $0.name.lowercased().hasPrefix(q) }
+    }
+
+    private func mentionMenu(_ mention: (range: Range<String.Index>, query: String)) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(mentionMatches(mention.query)) { p in
+                Button { insertMention(p, replacing: mention.range) } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: p.icon).foregroundStyle(p.color).frame(width: 18)
+                        Text(p.name).font(.callout.weight(.medium))
+                        Text(p.role).font(.caption).foregroundStyle(.secondary)
+                        Spacer()
+                        Image(systemName: p.model.providerGlyph)
+                            .font(.system(size: 9)).foregroundStyle(p.model.providerColor)
+                    }
+                    .padding(.horizontal, 12).padding(.vertical, 5)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.vertical, 4)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.background)
+    }
+
+    private func insertMention(_ p: Persona, replacing range: Range<String.Index>) {
+        draft.replaceSubrange(range, with: "@\(p.name) ")
+        composerFocused = true
     }
 
     private func send() {
         let q = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !q.isEmpty, !sending else { return }
+        let persona = addressedPersona
         draft = ""
         turns.append(ChatTurn(role: .user, text: q))
         persist()
@@ -196,8 +257,14 @@ struct ChatView: View {
                 [ChatMessage(role: t.role == .user ? "user" : "assistant", content: t.text)]
             }
             do {
-                let resp = try await client.chat(q, history: Array(history))
-                turns.append(ChatTurn(role: .assistant, text: resp.answer, sources: resp.sources))
+                let resp = try await client.chat(q, history: Array(history), persona: persona)
+                var turn = ChatTurn(role: .assistant, text: resp.answer, sources: resp.sources)
+                if let p = persona {
+                    turn.personaName = p.name
+                    turn.personaIcon = p.icon
+                    turn.personaColorName = p.colorName
+                }
+                turns.append(turn)
             } catch {
                 turns.append(ChatTurn(role: .assistant, text: "⚠︎ \(error.localizedDescription)"))
             }
@@ -212,6 +279,8 @@ private struct TurnView: View {
     let openSource: (ChatSource) -> Void
     @Environment(SpeechController.self) private var speech
 
+    private var personaColor: Color { PersonaPalette.color(turn.personaColorName ?? "accent") }
+
     var body: some View {
         if turn.role == .user {
             HStack {
@@ -224,8 +293,16 @@ private struct TurnView: View {
             }
         } else {
             VStack(alignment: .leading, spacing: 10) {
+                if let name = turn.personaName {
+                    HStack(spacing: 6) {
+                        Image(systemName: turn.personaIcon ?? "person.fill").foregroundStyle(personaColor)
+                        Text(name).font(.caption.weight(.semibold)).foregroundStyle(personaColor)
+                    }
+                }
                 HStack(alignment: .top, spacing: 10) {
-                    Image(systemName: "sparkles").foregroundStyle(.tint).font(.title3)
+                    Image(systemName: turn.personaName == nil ? "sparkles" : (turn.personaIcon ?? "person.fill"))
+                        .foregroundStyle(turn.personaName == nil ? AnyShapeStyle(.tint) : AnyShapeStyle(personaColor))
+                        .font(.title3)
                     Text(turn.text)
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)

@@ -108,13 +108,16 @@ struct MainView: View {
                 case .library: LibraryView(client: client)
                 case .graph:   GraphView(client: client)
                 case .chat:    ChatView(client: client)
+                case .personas: PersonasView()
                 case .sparks:  SparksView(client: client)
                 case .problems:
                     ProblemsView(client: client, onBrainstorm: { objective in
                         roundtableSeed = objective
                         section = .roundtable
                     })
-                case .roundtable: RoundtableView(client: client, seed: $roundtableSeed)
+                case .roundtable:
+                    RoundtableView(client: client, seed: $roundtableSeed,
+                                   onManagePersonas: { section = .personas })
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -135,7 +138,7 @@ struct MainView: View {
 }
 
 enum AppSection: String, CaseIterable, Identifiable {
-    case search, add, library, graph, chat, sparks, problems, roundtable
+    case search, add, library, graph, chat, personas, sparks, problems, roundtable
     var id: String { rawValue }
     var title: String {
         switch self {
@@ -144,6 +147,7 @@ enum AppSection: String, CaseIterable, Identifiable {
         case .library: "Library"
         case .graph: "Graph"
         case .chat: "Chat"
+        case .personas: "Personas"
         case .sparks: "Sparks"
         case .problems: "Problems"
         case .roundtable: "Roundtable"
@@ -156,6 +160,7 @@ enum AppSection: String, CaseIterable, Identifiable {
         case .library: "books.vertical"
         case .graph: "point.3.connected.trianglepath.dotted"
         case .chat: "bubble.left.and.bubble.right"
+        case .personas: "person.crop.rectangle.stack"
         case .sparks: "sparkles"
         case .problems: "lightbulb.max"
         case .roundtable: "person.3.sequence"
@@ -168,6 +173,7 @@ enum AppSection: String, CaseIterable, Identifiable {
         case .library: "Browse and read your papers"
         case .graph: "Explore connections visually"
         case .chat: "Ask questions over everything"
+        case .personas: "Reusable AI agents"
         case .sparks: "Surprising connections"
         case .problems: "Unsolved gaps worth building"
         case .roundtable: "Agents brainstorm your idea"

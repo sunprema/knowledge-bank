@@ -12,6 +12,10 @@ final class DebateTab: Identifiable {
     let id = UUID()
     let session: RoundtableSession
     var objective: String
+    /// Which personas from the shared library sit at this debate's table. Empty
+    /// ⇒ "not chosen yet" — the setup screen treats that as all personas and
+    /// initializes the set on first appearance.
+    var selectedPersonaIds: Set<String> = []
     // Setup options, kept per-tab so each debate remembers its configuration.
     var rounds = 2
     var scoreEnabled = true
