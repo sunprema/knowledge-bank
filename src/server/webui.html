@@ -5,6 +5,10 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="dark light">
 <title>Knowledge Bank</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/markdown/markdown.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/edit/continuelist.js"></script>
 <style>
   /* Dark is the default theme; the light overrides below kick in when the
      OS reports a light appearance (prefers-color-scheme). Every colour the
@@ -282,6 +286,72 @@
   .modal .save{background:var(--accent);color:var(--on-accent);border:none;border-radius:8px;padding:9px 18px;font-weight:600}
   .modal .cancel{background:transparent;border:1px solid var(--line);border-radius:8px;padding:9px 18px;color:var(--muted)}
   code{background:var(--line2);padding:1px 6px;border-radius:5px;color:var(--accent)}
+
+  /* ---- compose ---- */
+  #view-compose{padding:0;display:flex;flex-direction:column;height:calc(100vh - 57px)}
+  .compose-wrap{display:flex;flex:1;overflow:hidden}
+  .compose-left{
+    flex:0 0 60%;display:flex;flex-direction:column;
+    border-right:1px solid var(--line);overflow:hidden;
+  }
+  .compose-meta{
+    display:flex;gap:8px;padding:12px 14px;
+    border-bottom:1px solid var(--line2);flex-wrap:wrap;flex-shrink:0;
+  }
+  .compose-meta input,.compose-meta select{
+    background:var(--panel);border:1px solid var(--line);border-radius:8px;
+    color:var(--text);padding:7px 11px;font:inherit;font-size:13px;
+  }
+  .compose-meta input:focus,.compose-meta select:focus{outline:none;border-color:var(--accent)}
+  #c-title{flex:1 1 180px}
+  #c-project{width:110px}
+  #c-tags{flex:1 1 140px}
+  #c-scope{flex:1 1 140px}
+  .compose-cm{flex:1;overflow:auto;position:relative;background:var(--panel)}
+  /* Override CodeMirror defaults to match KB theme */
+  .compose-cm .CodeMirror{
+    height:100%;min-height:200px;
+    font-family:'SF Mono',ui-monospace,'Cascadia Code',Consolas,'Liberation Mono',Menlo,monospace;
+    font-size:14px;line-height:1.75;
+    background:transparent;color:var(--text);border:none;
+  }
+  .compose-cm .CodeMirror-scroll{padding:4px 0}
+  .compose-cm .CodeMirror-lines{padding:12px 18px}
+  .compose-cm .CodeMirror-cursor{border-left-color:var(--accent)}
+  .compose-cm .CodeMirror-selected{background:var(--accent-glow2)}
+  .compose-cm .CodeMirror-gutters{background:transparent;border:none}
+  .compose-cm .cm-header{color:var(--accent);font-weight:600}
+  .compose-cm .cm-strong{color:var(--text);font-weight:600}
+  .compose-cm .cm-em{color:var(--muted);font-style:italic}
+  .compose-cm .cm-link,.compose-cm .cm-url{color:var(--accent)}
+  .compose-cm .cm-comment{color:var(--faint)}
+  @media(prefers-color-scheme:light){
+    .compose-cm .CodeMirror-selected{background:rgba(11,126,168,.12)}
+  }
+  .compose-actions{
+    padding:10px 14px;border-top:1px solid var(--line2);
+    display:flex;align-items:center;gap:10px;flex-shrink:0;
+  }
+  #c-status{color:var(--muted);font-size:13px;flex:1}
+  .compose-right{flex:1;display:flex;flex-direction:column;min-width:0}
+  .compose-chat-label{
+    padding:10px 14px;border-bottom:1px solid var(--line2);flex-shrink:0;
+    font-size:11px;text-transform:uppercase;letter-spacing:.6px;
+    color:var(--accent-dim);font-weight:600;
+  }
+  #c-chatlog{flex:1;overflow-y:auto;padding:12px 14px;display:flex;flex-direction:column;gap:10px}
+  .c-insert{
+    margin-top:5px;font-size:11px;background:transparent;
+    border:1px solid var(--line);border-radius:5px;
+    padding:2px 9px;color:var(--muted);cursor:pointer;
+  }
+  .c-insert:hover{border-color:var(--accent);color:var(--accent)}
+  @media(max-width:720px){
+    .compose-wrap{flex-direction:column}
+    .compose-left{flex:none;border-right:none;border-bottom:1px solid var(--line)}
+    .compose-cm{min-height:260px}
+    #view-compose{height:auto}
+  }
 </style>
 </head>
 <body>
@@ -294,6 +364,7 @@
     <button id="nav-graph" onclick="show('graph')">Graph</button>
     <button id="nav-sparks" onclick="show('sparks')">Sparks</button>
     <button id="nav-analytics" onclick="show('analytics')">Analytics</button>
+    <button id="nav-compose" onclick="show('compose')">Compose</button>
   </nav>
   <div class="spacer"></div>
   <button class="keybtn" onclick="openKey()">API key <span id="keystatus"></span></button>
@@ -390,6 +461,40 @@
     <div class="grid" id="stat-cards"></div>
     <div class="panel"><h2>Chunks per section</h2><div id="sections"></div></div>
     <div class="panel"><h2>Tags</h2><div class="cloud" id="cloud"></div></div>
+  </section>
+
+  <section id="view-compose" style="display:none">
+    <div class="compose-wrap">
+      <div class="compose-left">
+        <div class="compose-meta">
+          <input type="text" id="c-title" placeholder="Title…">
+          <select id="c-kind" onchange="toggleComposeKind()">
+            <option value="idea">Idea</option>
+            <option value="reflection">Reflection</option>
+          </select>
+          <input type="text" id="c-project" value="global" placeholder="Project…" title="Project tag (e.g. global, research, work)">
+          <input type="text" id="c-scope" placeholder="Scope (paper IDs…)" style="display:none" title="Comma-separated paper IDs this reflection synthesizes">
+          <input type="text" id="c-tags" placeholder="Tags (comma-separated)…">
+        </div>
+        <div class="compose-cm" id="c-cm"></div>
+        <div class="compose-actions">
+          <button class="searchbtn" onclick="saveCompose()">Save to KB</button>
+          <button class="keybtn" onclick="clearCompose()">Clear</button>
+          <span id="c-status"></span>
+        </div>
+      </div>
+      <div class="compose-right">
+        <div class="compose-chat-label">Co-author · AI</div>
+        <div class="chatlog" id="c-chatlog">
+          <div class="msg">Ask me to help expand, improve, or connect your idea to existing knowledge in the KB.</div>
+        </div>
+        <div class="chatbar">
+          <input type="text" id="c-cq" placeholder="Ask your co-author…"
+                 onkeydown="if(event.key==='Enter')doComposeChat()">
+          <button class="searchbtn" onclick="doComposeChat()">Ask</button>
+        </div>
+      </div>
+    </div>
   </section>
 </main>
 
@@ -498,7 +603,7 @@ async function api(path, opts={}){
   return r.json();
 }
 
-const VIEWS = ['papers','search','chat','graph','sparks','analytics'];
+const VIEWS = ['papers','search','chat','graph','sparks','analytics','compose'];
 function show(v){
   if (!VIEWS.includes(v)) v='papers';
   VIEWS.forEach(name => {
@@ -512,6 +617,7 @@ function show(v){
   if (v==='sparks') loadSparks();
   if (v==='search') $('sq').focus();
   if (v==='chat') $('cq').focus();
+  if (v==='compose'){ initCompose(); $('c-cq').focus(); }
   if (v==='graph'){ setupGraph(); if (!gData) loadGraph(); else { resizeCanvas(); startGraphLoop(); } }
   else stopGraphLoop();   // pause the render loop when the graph isn't visible
 }
@@ -1087,6 +1193,135 @@ function updateGraphInfo(){
 
 // Filter/highlight controls just request a repaint — render reads them live.
 function drawGraph(){ if (gSim) ensureGraphLoop(); }
+
+/* ---------- compose ---------- */
+let cmEditor = null;
+let composeChatHistory = [];
+const composeMessages = [];   // indexed by bubble so onclick avoids inline escaping
+
+function initCompose(){
+  if (cmEditor) return;
+  cmEditor = CodeMirror($('c-cm'), {
+    mode: 'markdown',
+    lineWrapping: true,
+    autofocus: false,
+    tabSize: 2,
+    indentWithTabs: false,
+    extraKeys: { Enter: 'newlineAndIndentContinueMarkdownList' },
+  });
+  cmEditor.setSize('100%', '100%');
+}
+
+function toggleComposeKind(){
+  const isReflection = $('c-kind').value === 'reflection';
+  $('c-project').style.display = isReflection ? 'none' : '';
+  $('c-scope').style.display   = isReflection ? ''     : 'none';
+}
+
+function getDraft(){ return cmEditor ? cmEditor.getValue() : ''; }
+
+function insertIntoDraft(text){
+  if (!cmEditor) return;
+  const doc = cmEditor.getDoc();
+  const cursor = doc.getCursor();
+  // Insert with blank-line padding so it reads as a new paragraph.
+  const val = cmEditor.getValue();
+  const prefix = val && !val.endsWith('\n\n') ? (val.endsWith('\n') ? '\n' : '\n\n') : '';
+  doc.replaceRange(prefix + text + '\n\n', cursor);
+  cmEditor.focus();
+}
+
+function clearCompose(){
+  if (cmEditor) cmEditor.setValue('');
+  $('c-title').value = '';
+  $('c-tags').value = '';
+  $('c-scope').value = '';
+  $('c-project').value = 'global';
+  $('c-kind').value = 'idea';
+  toggleComposeKind();
+  composeChatHistory = [];
+  composeMessages.length = 0;
+  $('c-chatlog').innerHTML = `<div class="msg">Ask me to help expand, improve, or connect your idea to existing knowledge in the KB.</div>`;
+  $('c-status').textContent = '';
+}
+
+function appendComposeMsg(role, text, pending){
+  const log = $('c-chatlog');
+  const empty = log.querySelector('.msg'); if (empty) log.innerHTML = '';
+  const div = document.createElement('div');
+  div.className = 'cbubble ' + role + (pending ? ' pending' : '');
+  div.innerHTML = `<div class="ctext">${esc(text)}</div>`;
+  log.appendChild(div);
+  log.scrollTop = log.scrollHeight;
+  return div;
+}
+
+function composeAssistBubble(text){
+  const idx = composeMessages.length;
+  composeMessages.push(text);
+  return `<div class="cbubble assistant">
+    <div class="ctext">${esc(text)}</div>
+    <button class="c-insert" onclick="insertIntoDraft(composeMessages[${idx}])">↓ Insert into draft</button>
+  </div>`;
+}
+
+async function doComposeChat(){
+  const q = $('c-cq').value.trim();
+  if (!q) return;
+  $('c-cq').value = '';
+  appendComposeMsg('user', q);
+  const draft = getDraft();
+  const pending = appendComposeMsg('assistant', 'Thinking…', true);
+  try{
+    const res = await api('/compose/assist', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ draft, message: q, history: composeChatHistory }),
+    });
+    composeChatHistory.push({ role:'user', content:q }, { role:'assistant', content:res.answer });
+    if (composeChatHistory.length > 12) composeChatHistory = composeChatHistory.slice(-12);
+    pending.outerHTML = composeAssistBubble(res.answer);
+    $('c-chatlog').scrollTop = $('c-chatlog').scrollHeight;
+  }catch(e){
+    pending.outerHTML = `<div class="cbubble assistant"><div class="ctext err">${esc(e.message)}</div></div>`;
+  }
+}
+
+async function saveCompose(){
+  const title = $('c-title').value.trim();
+  const body  = getDraft().trim();
+  const kind  = $('c-kind').value;
+  if (!title){ $('c-status').textContent = 'Title is required.'; return; }
+  if (!body){  $('c-status').textContent = 'Body is required.';  return; }
+
+  const tagsRaw = $('c-tags').value.trim();
+  const tags = tagsRaw ? tagsRaw.split(',').map(t=>t.trim()).filter(Boolean) : [];
+
+  $('c-status').textContent = 'Saving…';
+  try{
+    let res;
+    if (kind === 'idea'){
+      const project = $('c-project').value.trim() || 'global';
+      res = await api('/ideas', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title, body, project, tags }),
+      });
+    } else {
+      const scopeRaw = $('c-scope').value.trim();
+      const scope = scopeRaw ? scopeRaw.split(',').map(s=>s.trim()).filter(Boolean) : [];
+      res = await api('/reflections', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title, body, scope, tags }),
+      });
+    }
+    $('c-status').textContent = `✓ Saved as ${res.id} (${res.chunks} chunks)`;
+    await loadPapers();
+  }catch(e){
+    $('c-status').textContent = `Error: ${e.message}`;
+  }
+}
 
 /* ---------- boot ---------- */
 function init(){ keyStatus(); loadPapers(); }

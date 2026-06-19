@@ -223,6 +223,37 @@ the thresholds under `[cortex]` in `config.toml` (`min_similarity`,
 `min_domain_distance`); see [CONFIG.md](./CONFIG.md). Turn the whole layer off
 with `[cortex] enabled = false`.
 
+### Problem hunting — the ResearchAgent
+
+```text
+# via MCP (Claude Code):   kb_find_problems(domain?, k?)
+# via HTTP:                POST /problems   {"domain": "vector quantization", "k": 8}
+# in the macOS app:        the "Problems" view
+```
+
+One of the KB's goals is to constantly hunt for problems worth solving.
+`kb_find_problems` mines the corpus for *unsolved* problems and pairs each
+with whatever you've saved that already points toward a solution. Like Cortex,
+it leans on the section types most systems discard: it pulls problem statements
+from papers' `limitations`/`future_work` sections (optionally focused by a
+`domain` query), then for each one searches the corpus's `method`/`applications`
+sections — in *other* papers — for the nearest work. Every candidate comes back
+tagged with a `gap_type`:
+
+- **`synthesis_opportunity`** — solution pieces exist across other papers but
+  aren't assembled (the `solutions` list is non-empty). This is the build-it
+  signal: the problem is real and the corpus already holds parts of the answer.
+- **`greenfield`** — nothing in the corpus clears the relevance floor; the
+  problem is stated but unaddressed.
+
+Where Cortex's **need → solution** spark passively precomputes such links across
+the whole corpus, `kb_find_problems` is the on-demand, domain-focusable version:
+it returns full problem statements with a ranked list of candidate solutions to
+reason over. It's **API-free** beyond the single query embedding (it reuses the
+cached chunk vectors) and adds no index. The natural agent loop is
+`kb_find_problems` → judge the candidates → `kb_create_reflection` to persist
+the promising ones, so the hunt compounds across sessions.
+
 ### Notes and tags
 
 ```bash
@@ -295,6 +326,7 @@ startup (override with `KB_API_KEY`, rotate with `kb rotate-key`).
 | `GET /papers` | list documents (`?tag=`, `?category=`) |
 | `GET /papers/{id}` | metadata + notes + PDF path |
 | `POST /search` | semantic search (body: `query`, `mode`, `k`, filters) |
+| `POST /problems` | hunt unsolved problems (limitations/future_work) paired with nearby method/applications work (body: optional `domain`, `k`) |
 | `GET /papers/{id}/similar` | documents most similar to this one (`?limit=`) |
 | `GET /graph` | the corpus as nodes + edges (`?neighbors=` similarity edges per node) |
 | `GET /sparks` | Cortex's surprising connections (`?kind=need_solution\|cross_domain`, `?limit=`) |
@@ -347,6 +379,7 @@ Tools exposed:
 | Tool | Purpose |
 |---|---|
 | `kb_search` | Narrow/wide/filtered semantic search (supports `section_types`, `kind`, `project`) |
+| `kb_find_problems` | Hunt the corpus for unsolved problems (limitations/future_work) paired with nearby method/applications work; tags each `greenfield` vs `synthesis_opportunity` |
 | `kb_get_paper` | Full metadata + notes for a specific document |
 | `kb_add_note` | Append a note to a paper and re-embed immediately |
 | `kb_capture_idea` | Agent-side twin of `kb idea add` — upserts standalone ideas by project |

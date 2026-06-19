@@ -48,6 +48,15 @@ struct KBClient: Sendable {
         return try await post("/search", json: body)
     }
 
+    /// Hunt the corpus for unsolved problems (limitations/future_work) paired
+    /// with the nearest method/applications work elsewhere. `domain` focuses the
+    /// hunt; omit it to scan broadly.
+    func problems(domain: String? = nil, k: Int = 8) async throws -> ProblemsResponse {
+        var body: [String: Any] = ["k": k]
+        if let domain, !domain.isEmpty { body["domain"] = domain }
+        return try await post("/problems", json: body)
+    }
+
     func chat(_ query: String, history: [ChatMessage]) async throws -> ChatResponse {
         try await post("/chat", json: ["query": query, "history": history.map { ["role": $0.role, "content": $0.content] }])
     }

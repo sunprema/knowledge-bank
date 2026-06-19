@@ -159,6 +159,17 @@ fn tool_definitions() -> Value {
             }
         },
         {
+            "name": "kb_find_problems",
+            "description": "Hunt the user's corpus for unsolved problems worth building a solution for. Returns problem statements (drawn from papers' limitations/future_work sections), each paired with the nearest method/applications work found in OTHER papers. gap_type is 'greenfield' (nothing in the corpus addresses it) or 'synthesis_opportunity' (the solution pieces exist across papers but aren't assembled). Use when the user asks what to build, what problems are unsolved, or to mine product/research opportunities. After judging the candidates, persist the promising ones with kb_create_reflection so the hunt compounds across sessions.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "domain": { "type": "string", "description": "Optional topic to focus the hunt (e.g. 'vector quantization'). Omit to scan broadly." },
+                    "k": { "type": "integer", "default": 8, "minimum": 1, "maximum": 30, "description": "Number of problem candidates to return." }
+                }
+            }
+        },
+        {
             "name": "kb_get_paper",
             "description": "Get full metadata, abstract, and user notes for a specific paper. Use after kb_search when Claude needs more context than a chunk snippet provides.",
             "inputSchema": {
@@ -213,6 +224,7 @@ async fn call_tool(
 ) -> Result<String, KbError> {
     match name {
         "kb_search" => tool_search(paths, config, args).await,
+        "kb_find_problems" => tool_find_problems(paths, config, args).await,
         "kb_get_paper" => tool_get_paper(paths, args),
         "kb_add_note" => tool_add_note(paths, config, args).await,
         "kb_capture_idea" => tool_capture_idea(paths, config, args).await,
@@ -291,6 +303,27 @@ async fn tool_search(paths: &KbPaths, config: &Config, args: &Value) -> Result<S
     };
 
     let response = retrieval::search(paths, config, &query, mode, k, filters).await?;
+    serde_json::to_string_pretty(&response)
+        .map_err(|e| KbError::Index(format!("serialize results: {e}")))
+}
+
+async fn tool_find_problems(
+    paths: &KbPaths,
+    config: &Config,
+    args: &Value,
+) -> Result<String, KbError> {
+    let domain = args
+        .get("domain")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|d| !d.is_empty());
+    let k = args
+        .get("k")
+        .and_then(|k| k.as_u64())
+        .map(|k| (k as usize).clamp(1, 30))
+        .unwrap_or(8);
+
+    let response = retrieval::find_problems(paths, config, domain, k).await?;
     serde_json::to_string_pretty(&response)
         .map_err(|e| KbError::Index(format!("serialize results: {e}")))
 }

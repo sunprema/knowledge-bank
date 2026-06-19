@@ -1237,10 +1237,8 @@ implementation began. These are now locked decisions.
 
 These appear in scope-creep brainstorms but should be rejected:
 
-- ❌ A built-in PDF reader / annotation tool
 - ❌ Multi-user sharing or cloud sync
 - ❌ Real-time collaboration
-- ❌ A web UI for the KB itself (CLI + MCP + HTTP is enough)
 - ❌ ML-based summarization of papers (Claude does this on demand;
      we don't precompute)
 - ❌ Author profile pages, paper recommendations from external services
@@ -1250,6 +1248,21 @@ These appear in scope-creep brainstorms but should be rejected:
      just reference them)
 - ❌ Anything that requires keeping the binary running 24/7 (the
      watcher is optional; CLI + MCP work fine without it)
+
+### Retired anti-goals (the project has since evolved past v0.1)
+
+Two original anti-goals — "a web UI for the KB itself" and "a built-in PDF
+reader" — have been **deliberately retired**, not violated:
+
+- A single-file web app now ships (`src/server/webui.html`, served at `/`),
+  with a paper browser, analytics, chat, a 3D knowledge graph, and the Cortex
+  sparks feed.
+- A native macOS front-end (including a PDFKit reader and speech readout) is
+  specified in [`LOCAL_UI_PRD.md`](./LOCAL_UI_PRD.md).
+
+These are clients over the same engine (CLI / MCP / HTTP remain the contract);
+they do not change the local-first, files-are-forever, single-user core. The
+remaining anti-goals above still hold.
 
 ---
 

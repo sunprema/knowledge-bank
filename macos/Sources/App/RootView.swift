@@ -84,6 +84,7 @@ struct MainView: View {
                 case .graph:   GraphView(client: client)
                 case .chat:    ChatView(client: client)
                 case .sparks:  SparksView(client: client)
+                case .problems: ProblemsView(client: client)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -104,7 +105,7 @@ struct MainView: View {
 }
 
 enum AppSection: String, CaseIterable, Identifiable {
-    case search, library, graph, chat, sparks
+    case search, library, graph, chat, sparks, problems
     var id: String { rawValue }
     var title: String {
         switch self {
@@ -113,6 +114,7 @@ enum AppSection: String, CaseIterable, Identifiable {
         case .graph: "Graph"
         case .chat: "Chat"
         case .sparks: "Sparks"
+        case .problems: "Problems"
         }
     }
     var icon: String {
@@ -122,6 +124,7 @@ enum AppSection: String, CaseIterable, Identifiable {
         case .graph: "point.3.connected.trianglepath.dotted"
         case .chat: "bubble.left.and.bubble.right"
         case .sparks: "sparkles"
+        case .problems: "lightbulb.max"
         }
     }
     var subtitle: String {
@@ -131,6 +134,7 @@ enum AppSection: String, CaseIterable, Identifiable {
         case .graph: "Explore connections visually"
         case .chat: "Ask questions over everything"
         case .sparks: "Surprising connections"
+        case .problems: "Unsolved gaps worth building"
         }
     }
 }

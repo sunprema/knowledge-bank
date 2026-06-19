@@ -22,6 +22,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
+use crate::chat::ChatMessage;
 use crate::config::{Config, KbPaths};
 use crate::index::MetaDb;
 use crate::ingest::pipeline;
@@ -100,12 +101,16 @@ fn router(state: Shared) -> Router {
         .route("/stats", get(stats))
         .route("/papers", get(list_papers))
         .route("/papers/{paper_id}", get(get_paper))
-        .route("/papers/{paper_id}/notes", post(add_note))
+        .route("/papers/{paper_id}/notes", post(add_note).put(put_notes))
         .route("/papers/{paper_id}/similar", get(similar))
         .route("/graph", get(graph))
         .route("/sparks", get(sparks))
         .route("/search", post(search))
+        .route("/problems", post(problems))
         .route("/chat", post(chat))
+        .route("/ideas", post(create_idea))
+        .route("/reflections", post(create_reflection))
+        .route("/compose/assist", post(compose_assist))
         .route("/chunks/{chunk_id}", get(get_chunk))
         .route("/pdf/{paper_id}", get(get_pdf))
         .route("/open/{chunk_id}", get(open_chunk))
@@ -400,6 +405,32 @@ async fn search(
 }
 
 #[derive(Deserialize)]
+struct ProblemsRequest {
+    /// Optional topic to focus the hunt; omitted = scan broadly.
+    domain: Option<String>,
+    k: Option<usize>,
+}
+
+/// Problem hunting (ResearchAgent): surface unsolved problems (papers'
+/// limitations/future_work) paired with the nearest method/applications work
+/// elsewhere in the corpus. Embeds across `.await` while holding the stores, so
+/// it runs on a blocking thread (same as `/search`).
+async fn problems(
+    State(state): State<Shared>,
+    Json(req): Json<ProblemsRequest>,
+) -> Result<Json<retrieval::ProblemsResponse>, ApiError> {
+    let k = req.k.unwrap_or(8).clamp(1, 30);
+    let paths = state.paths.clone();
+    let config = state.config.clone();
+    let domain = req.domain;
+    let resp = run_blocking(move || async move {
+        retrieval::find_problems(&paths, &config, domain.as_deref(), k).await
+    })
+    .await?;
+    Ok(Json(resp))
+}
+
+#[derive(Deserialize)]
 struct SimilarQuery {
     limit: Option<usize>,
 }
@@ -470,7 +501,7 @@ async fn sparks(
 struct ChatRequest {
     query: String,
     #[serde(default)]
-    history: Vec<crate::chat::ChatMessage>,
+    history: Vec<ChatMessage>,
 }
 
 /// Chat-over-corpus: wide-retrieve context, answer with the chat model, return
@@ -487,6 +518,89 @@ async fn chat(
     })
     .await?;
     Ok(Json(resp))
+}
+
+#[derive(Deserialize)]
+struct CreateIdeaRequest {
+    title: String,
+    body: String,
+    project: Option<String>,
+    #[serde(default)]
+    tags: Vec<String>,
+    #[serde(default)]
+    links: Vec<String>,
+}
+
+async fn create_idea(
+    State(state): State<Shared>,
+    Json(req): Json<CreateIdeaRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let paths = state.paths.clone();
+    let config = state.config.clone();
+    let report = run_blocking(move || async move {
+        let spec = pipeline::IdeaSpec {
+            slug: None,
+            project: req.project.unwrap_or_else(|| "global".into()),
+            title: req.title,
+            body: req.body,
+            tags: req.tags,
+            links: req.links,
+        };
+        pipeline::ingest_idea(&paths, &config, &spec, &|_| {}).await
+    })
+    .await?;
+    Ok(Json(json!({ "ok": true, "id": report.paper_id, "chunks": report.chunks })))
+}
+
+#[derive(Deserialize)]
+struct CreateReflectionRequest {
+    title: String,
+    body: String,
+    #[serde(default)]
+    scope: Vec<String>,
+    #[serde(default)]
+    tags: Vec<String>,
+}
+
+async fn create_reflection(
+    State(state): State<Shared>,
+    Json(req): Json<CreateReflectionRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let paths = state.paths.clone();
+    let config = state.config.clone();
+    let report = run_blocking(move || async move {
+        let spec = pipeline::ReflectionSpec {
+            slug: None,
+            title: req.title,
+            body: req.body,
+            scope: req.scope,
+            tags: req.tags,
+        };
+        pipeline::ingest_reflection(&paths, &config, &spec, &|_| {}).await
+    })
+    .await?;
+    Ok(Json(json!({ "ok": true, "id": report.paper_id, "chunks": report.chunks })))
+}
+
+#[derive(Deserialize)]
+struct ComposeAssistRequest {
+    draft: String,
+    message: String,
+    #[serde(default)]
+    history: Vec<ChatMessage>,
+}
+
+async fn compose_assist(
+    State(state): State<Shared>,
+    Json(req): Json<ComposeAssistRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let paths = state.paths.clone();
+    let config = state.config.clone();
+    let answer = run_blocking(move || async move {
+        retrieval::compose_assist(&paths, &config, &req.draft, &req.message, &req.history).await
+    })
+    .await?;
+    Ok(Json(json!({ "answer": answer })))
 }
 
 #[derive(Deserialize)]
@@ -524,6 +638,36 @@ async fn add_note(
             Ok(()) => format!("note appended to {paper_id} and re-embedded"),
             Err(e) => format!(
                 "note appended to {paper_id}; re-embedding deferred ({e}) — a running `kb watch` or `kb reindex` will pick it up"
+            ),
+        })
+    })
+    .await?;
+    Ok(Json(json!({ "ok": true, "message": message })))
+}
+
+/// Overwrite a paper's `notes.md` wholesale and re-embed (the editable-notes
+/// editor). Unlike `add_note` (append-only), this replaces the file with the
+/// supplied content — the canonical, hand-editable note body.
+async fn put_notes(
+    State(state): State<Shared>,
+    Path(paper_id): Path<String>,
+    Json(req): Json<NoteRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let paths = state.paths.clone();
+    let config = state.config.clone();
+    let body = req.note;
+    let message = run_blocking(move || async move {
+        let meta_path = paths.metadata_path(&paper_id);
+        if !meta_path.exists() {
+            return Err(KbError::NotFound(format!("{paper_id} is not in the KB")));
+        }
+        std::fs::write(paths.notes_path(&paper_id), body.as_bytes())
+            .map_err(|e| KbError::Index(format!("write notes.md: {e}")))?;
+
+        Ok(match pipeline::reembed_notes(&paths, &config, &paper_id).await {
+            Ok(()) => format!("notes saved to {paper_id} and re-embedded"),
+            Err(e) => format!(
+                "notes saved to {paper_id}; re-embedding deferred ({e}) — a running `kb watch` or `kb reindex` will pick it up"
             ),
         })
     })
