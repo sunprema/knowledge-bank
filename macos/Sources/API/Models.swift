@@ -5,6 +5,45 @@ import Foundation
 // `snake_case` fields map to Swift `camelCase` here. Keep in lockstep with the
 // engine — drift here is the likeliest source of bugs (see LOCAL_UI_PRD §3).
 
+// MARK: - Ingest
+
+/// The finished document from an ingest run (the SSE `done` frame).
+struct IngestResult: Decodable {
+    let ok: Bool
+    let id: String
+    let title: String
+    let chunks: Int
+    let sourceFormat: String
+}
+
+/// One Server-Sent frame from `POST /ingest`: live status, a final result, or
+/// a failure. Mirrors the engine's tagged `IngestEvent` (src/server/http.rs).
+enum IngestEvent: Decodable {
+    case progress(String)
+    case done(IngestResult)
+    case error(String)
+
+    private enum CodingKeys: String, CodingKey {
+        case type, message, id, title, chunks, sourceFormat
+    }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        switch try c.decode(String.self, forKey: .type) {
+        case "done":
+            self = .done(IngestResult(
+                ok: true,
+                id: try c.decode(String.self, forKey: .id),
+                title: try c.decode(String.self, forKey: .title),
+                chunks: try c.decode(Int.self, forKey: .chunks),
+                sourceFormat: try c.decode(String.self, forKey: .sourceFormat)))
+        case "error":
+            self = .error(try c.decode(String.self, forKey: .message))
+        default:   // "progress"
+            self = .progress(try c.decode(String.self, forKey: .message))
+        }
+    }
+}
+
 // MARK: - Papers
 
 struct PaperMetadata: Codable, Identifiable, Hashable {

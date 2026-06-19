@@ -270,10 +270,16 @@ final class RoundtableSession {
     }
 
     private func saveRecord() {
-        let record = RoundtableRecord(id: recordId, objective: objective,
-                                      createdAt: createdAt, updatedAt: Date(),
-                                      personas: personas, turns: turns, scores: scores)
-        RoundtableStore.shared.save(record)
+        RoundtableStore.shared.save(snapshotRecord())
+    }
+
+    /// This session's current state as a `RoundtableRecord` — the same value that
+    /// gets persisted, reused by the PDF exporter so live and saved runs share
+    /// one report path.
+    func snapshotRecord() -> RoundtableRecord {
+        RoundtableRecord(id: recordId, objective: objective,
+                         createdAt: createdAt, updatedAt: Date(),
+                         personas: personas, turns: turns, scores: scores)
     }
 
     func reset() {

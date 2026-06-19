@@ -23,7 +23,7 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tokio_stream::{StreamExt, wrappers::ReceiverStream};
+use tokio_stream::{StreamExt, wrappers::ReceiverStream, wrappers::UnboundedReceiverStream};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::agents::roundtable::{self, BrainstormRequest};
@@ -119,6 +119,7 @@ fn router(state: Shared) -> Router {
         .route("/chat", post(chat))
         .route("/brainstorm", post(brainstorm))
         .route("/brainstorm/{session_id}/interject", post(interject))
+        .route("/ingest", post(ingest))
         .route("/ideas", post(create_idea))
         .route("/reflections", post(create_reflection))
         .route("/compose/assist", post(compose_assist))
@@ -613,6 +614,114 @@ struct CreateIdeaRequest {
     tags: Vec<String>,
     #[serde(default)]
     links: Vec<String>,
+}
+
+/// `kb add` over HTTP. Exactly one source: an arXiv id/URL, a web page `url`,
+/// or a local `pdf_path` (the engine and app share the machine, so a path the
+/// app picked is readable here).
+#[derive(Deserialize)]
+struct IngestRequest {
+    #[serde(default)]
+    arxiv: Option<String>,
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    pdf_path: Option<String>,
+}
+
+/// SSE frames for a running ingest. `progress` mirrors the CLI spinner's status
+/// lines as they happen; the run ends with exactly one `done` or `error`.
+#[derive(serde::Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum IngestEvent {
+    Progress { message: String },
+    Done {
+        id: String,
+        title: String,
+        chunks: usize,
+        source_format: String,
+    },
+    Error { message: String },
+}
+
+/// Streams ingestion as Server-Sent Events so the UI can show live progress
+/// (downloading → chunking → embedding). A failure is an `error` event, not a
+/// failed request — the stream still opens 200, matching `/brainstorm`.
+async fn ingest(
+    State(state): State<Shared>,
+    Json(req): Json<IngestRequest>,
+) -> impl IntoResponse {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<IngestEvent>();
+    let paths = state.paths.clone();
+    let config = state.config.clone();
+
+    // Ingestion mixes async network calls with blocking sqlite/index work, so
+    // run it on a blocking thread with its own runtime (as the prior sync path
+    // did). The `progress` closure forwards each status line into the SSE
+    // channel via the non-blocking `UnboundedSender::send`.
+    tokio::task::spawn_blocking(move || {
+        let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+            Ok(rt) => rt,
+            Err(e) => {
+                let _ = tx.send(IngestEvent::Error { message: format!("build runtime: {e}") });
+                return;
+            }
+        };
+        rt.block_on(async move {
+            let progress = {
+                let tx = tx.clone();
+                move |msg: &str| {
+                    let _ = tx.send(IngestEvent::Progress { message: msg.to_string() });
+                }
+            };
+            let arxiv = req.arxiv.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+            let url = req.url.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+            let pdf = req.pdf_path.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+            let result = match (arxiv, url, pdf) {
+                (Some(id), None, None) => {
+                    pipeline::ingest_paper(&paths, &config, &id, false, &progress).await
+                }
+                (None, Some(url), None) => {
+                    pipeline::ingest_url(&paths, &config, &url, false, &progress).await
+                }
+                (None, None, Some(path)) => {
+                    pipeline::ingest_local_pdf(&paths, &config, std::path::Path::new(&path), &progress).await
+                }
+                (None, None, None) => Err(KbError::Usage(
+                    "provide one of: arxiv, url, or pdf_path".into(),
+                )),
+                _ => Err(KbError::Usage(
+                    "provide exactly one of: arxiv, url, or pdf_path".into(),
+                )),
+            };
+            match result {
+                Ok(report) => {
+                    let source_format = match report.source_format {
+                        crate::SourceFormat::Latex => "latex",
+                        crate::SourceFormat::Pdf => "pdf",
+                        crate::SourceFormat::Markdown => "markdown",
+                        crate::SourceFormat::Html => "html",
+                    };
+                    let _ = tx.send(IngestEvent::Done {
+                        id: report.paper_id,
+                        title: report.title,
+                        chunks: report.chunks,
+                        source_format: source_format.to_string(),
+                    });
+                }
+                Err(e) => {
+                    let _ = tx.send(IngestEvent::Error { message: e.to_string() });
+                }
+            }
+        });
+    });
+
+    let stream = UnboundedReceiverStream::new(rx).map(|ev| {
+        Event::default()
+            .json_data(&ev)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+    });
+    Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
 async fn create_idea(

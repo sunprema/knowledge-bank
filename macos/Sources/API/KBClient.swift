@@ -89,6 +89,47 @@ struct KBClient: Sendable {
         return r.message.isEmpty ? "Saved idea" : r.message
     }
 
+    /// Ingest a new document into the corpus — the `kb add` flow, streamed.
+    /// Pass exactly one of: an arXiv id/URL, a web page `url`, or a local
+    /// `pdfPath`. The engine pushes `IngestEvent`s as Server-Sent Events while
+    /// it downloads, chunks, and embeds; the run ends with one `.done` (or
+    /// `.error`). Cancelling the consuming task tears down the connection.
+    func ingestStream(arxiv: String? = nil, url: String? = nil, pdfPath: String? = nil) -> AsyncThrowingStream<IngestEvent, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    var req = request(path: "/ingest", method: "POST")
+                    req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                    req.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+                    req.timeoutInterval = 600   // download + chunk + embed can be slow
+                    var body: [String: Any] = [:]
+                    if let arxiv { body["arxiv"] = arxiv }
+                    if let url { body["url"] = url }
+                    if let pdfPath { body["pdf_path"] = pdfPath }
+                    req.httpBody = try JSONSerialization.data(withJSONObject: body)
+                    let (bytes, resp) = try await URLSession.shared.bytes(for: req)
+                    guard let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+                        throw KBError.server(status: (resp as? HTTPURLResponse)?.statusCode ?? -1,
+                                             message: "ingest request failed")
+                    }
+                    // One JSON object per `data:` line (same framing as brainstorm).
+                    for try await line in bytes.lines {
+                        guard line.hasPrefix("data:") else { continue }
+                        let json = line.dropFirst(5).drop(while: { $0 == " " })
+                        if let d = String(json).data(using: .utf8),
+                           let ev = try? Self.decoder.decode(IngestEvent.self, from: d) {
+                            continuation.yield(ev)
+                        }
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
     func graph(neighbors: Int = 3) async throws -> GraphResponse {
         try await get("/graph", query: [.init(name: "neighbors", value: String(neighbors))])
     }

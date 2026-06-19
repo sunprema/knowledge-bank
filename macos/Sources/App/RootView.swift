@@ -104,6 +104,7 @@ struct MainView: View {
             Group {
                 switch section {
                 case .search:  SearchView(client: client)
+                case .add:     AddView(client: client)
                 case .library: LibraryView(client: client)
                 case .graph:   GraphView(client: client)
                 case .chat:    ChatView(client: client)
@@ -134,11 +135,12 @@ struct MainView: View {
 }
 
 enum AppSection: String, CaseIterable, Identifiable {
-    case search, library, graph, chat, sparks, problems, roundtable
+    case search, add, library, graph, chat, sparks, problems, roundtable
     var id: String { rawValue }
     var title: String {
         switch self {
         case .search: "Search"
+        case .add: "Add"
         case .library: "Library"
         case .graph: "Graph"
         case .chat: "Chat"
@@ -150,6 +152,7 @@ enum AppSection: String, CaseIterable, Identifiable {
     var icon: String {
         switch self {
         case .search: "magnifyingglass"
+        case .add: "plus.circle"
         case .library: "books.vertical"
         case .graph: "point.3.connected.trianglepath.dotted"
         case .chat: "bubble.left.and.bubble.right"
@@ -161,6 +164,7 @@ enum AppSection: String, CaseIterable, Identifiable {
     var subtitle: String {
         switch self {
         case .search: "Find sections across the corpus"
+        case .add: "Ingest papers, pages & PDFs"
         case .library: "Browse and read your papers"
         case .graph: "Explore connections visually"
         case .chat: "Ask questions over everything"

@@ -37,7 +37,16 @@ struct RoundtableHistoryView: View {
                             .buttonStyle(.plain)
                             .listRowBackground(record.id == currentId ? Color.accentColor.opacity(0.10) : Color.clear)
                             .contextMenu {
+                                Button("Export PDF…", systemImage: "arrow.down.doc") {
+                                    RoundtablePDF.exportWithPanel(record)
+                                }
                                 Button("Delete", systemImage: "trash", role: .destructive) { delete(record) }
+                            }
+                            .swipeActions(edge: .leading) {
+                                Button("Export PDF", systemImage: "arrow.down.doc") {
+                                    RoundtablePDF.exportWithPanel(record)
+                                }
+                                .tint(.accentColor)
                             }
                             .swipeActions {
                                 Button("Delete", systemImage: "trash", role: .destructive) { delete(record) }

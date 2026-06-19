@@ -194,6 +194,10 @@ private struct DebateView: View {
                     Button { session.saveAsIdea(client: client) } label: { Image(systemName: "lightbulb.fill") }
                         .help("Save synthesis to the knowledge bank as an idea")
                 }
+                Button { RoundtablePDF.exportWithPanel(session.snapshotRecord()) } label: {
+                    Image(systemName: "arrow.down.doc")
+                }
+                .help("Export this debate as a PDF report")
             }
             Button { showLog.toggle() } label: { Image(systemName: "terminal") }
                 .help(showLog ? "Hide activity log" : "Show activity log")
