@@ -34,6 +34,25 @@ swiftc "${SOURCES[@]}" \
 
 cp "$HERE/Info.plist" "$APP/Contents/Info.plist"
 
+# Build the kb-ocr sidecar (Vision + PDFKit OCR for image-only PDFs). It's a
+# standalone CLI (its own `main`), so it compiles separately from the app's
+# -parse-as-library bundle. The engine finds it as a sibling, so we drop a copy
+# next to the engine in both the bundle's Resources/ and the dev target/ dir.
+echo "› compiling kb-ocr sidecar…"
+swiftc "$HERE/Tools/kb-ocr.swift" \
+    -o "$APP/Contents/Resources/kb-ocr" \
+    -sdk "$SDK" \
+    -target "$TARGET" \
+    -framework PDFKit \
+    -framework Vision \
+    -O
+chmod +x "$APP/Contents/Resources/kb-ocr"
+# Dev sibling: when the engine runs from target/{release,debug}/kb (not bundled),
+# it looks for kb-ocr next to itself there too.
+for d in "$HERE/../target/release" "$HERE/../target/debug"; do
+    [ -d "$d" ] && cp "$APP/Contents/Resources/kb-ocr" "$d/kb-ocr" && chmod +x "$d/kb-ocr"
+done
+
 # Bundle the engine so the app is self-contained (LOCAL_UI_PRD §2). Prefer the
 # release build; fall back to debug.
 ENGINE=""
@@ -56,8 +75,9 @@ fi
 # re-prompt, but on macOS it makes the app subject to TCC for external volumes
 # (e.g. /Volumes/x) — which then needs Full Disk Access granted to KB.app.
 SIGN_ID="${KB_SIGN_IDENTITY:--}"
-# Sign the bundled engine first, then the app (inside-out).
+# Sign the bundled engine and sidecar first, then the app (inside-out).
 [ -f "$APP/Contents/Resources/kb" ] && codesign --force --sign "$SIGN_ID" "$APP/Contents/Resources/kb" >/dev/null 2>&1
+[ -f "$APP/Contents/Resources/kb-ocr" ] && codesign --force --sign "$SIGN_ID" "$APP/Contents/Resources/kb-ocr" >/dev/null 2>&1
 if codesign --force --sign "$SIGN_ID" "$APP" >/dev/null 2>&1; then
     if [ "$SIGN_ID" = "-" ]; then
         echo "  ⚠ ad-hoc signed — Keychain 'Always Allow' won't persist across rebuilds."

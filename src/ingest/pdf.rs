@@ -364,6 +364,15 @@ fn resolve_array(doc: &Document, obj: &Object) -> Option<Vec<Object>> {
     }
 }
 
+/// The PDF's page count (for the OCR-recovery path when text extraction
+/// fails outright on an image-only document). A malformed PDF ⇒ `Extraction`.
+pub fn page_count(pdf_path: &Path) -> Result<usize, KbError> {
+    let doc = Document::load(pdf_path).map_err(|e| {
+        KbError::Extraction(format!("cannot parse {}: {e}", pdf_path.display()))
+    })?;
+    Ok(doc.get_pages().len())
+}
+
 /// Fallback text extraction, one String per page (PRD §4 step 4). The
 /// caller assembles `sections.md` with `## Page N` headings. Used only
 /// when LaTeX is unavailable or pandoc fails — graceful degradation.

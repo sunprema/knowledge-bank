@@ -3,6 +3,7 @@
 pub mod arxiv;
 pub mod html;
 pub mod latex;
+pub mod ocr;
 pub mod pdf;
 pub mod pipeline;
 pub mod sections;
