@@ -6,6 +6,8 @@ import SwiftUI
 // "greenfield" gap has none. Optionally focused by a domain query.
 struct ProblemsView: View {
     let client: KBClient
+    /// Send a problem to the Roundtable as a brainstorming objective.
+    var onBrainstorm: (String) -> Void = { _ in }
 
     @State private var problems: [ProblemCandidate] = []
     @State private var domain = ""
@@ -53,7 +55,9 @@ struct ProblemsView: View {
         } else {
             ScrollView {
                 LazyVStack(spacing: 12) {
-                    ForEach(problems) { ProblemCard(problem: $0) }
+                    ForEach(problems) { problem in
+                        ProblemCard(problem: problem, onBrainstorm: onBrainstorm)
+                    }
                 }
                 .padding(16)
             }
@@ -70,6 +74,7 @@ struct ProblemsView: View {
 
 private struct ProblemCard: View {
     let problem: ProblemCandidate
+    let onBrainstorm: (String) -> Void
 
     private var isSynthesis: Bool { problem.gapType == "synthesis_opportunity" }
 
@@ -97,6 +102,18 @@ private struct ProblemCard: View {
                     Text("Solution pieces elsewhere in your corpus")
                         .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
                     ForEach(problem.solutions) { SolutionRow(hit: $0) }
+                }
+
+                Divider()
+                HStack {
+                    Spacer()
+                    Button {
+                        onBrainstorm("Brainstorm a solution to this unsolved problem: \(problem.statement)")
+                    } label: {
+                        Label("Brainstorm a solution", systemImage: "person.3.sequence")
+                    }
+                    .buttonStyle(.borderless)
+                    .font(.callout.weight(.medium))
                 }
             }
         }

@@ -15,13 +15,18 @@ use axum::{
     extract::{Path, Query, Request, State},
     http::{HeaderValue, StatusCode, header},
     middleware::{self, Next},
-    response::{Html, IntoResponse, Response},
+    response::{
+        Html, IntoResponse, Response,
+        sse::{Event, KeepAlive, Sse},
+    },
     routing::{get, post},
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
+use tokio_stream::{StreamExt, wrappers::ReceiverStream};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
+use crate::agents::roundtable::{self, BrainstormRequest};
 use crate::chat::ChatMessage;
 use crate::config::{Config, KbPaths};
 use crate::index::MetaDb;
@@ -33,6 +38,9 @@ struct AppState {
     paths: KbPaths,
     config: Config,
     api_key: String,
+    /// Live roundtables, keyed by client session id → interjection sender. Lets
+    /// `POST /brainstorm/{id}/interject` push guidance into a running debate.
+    roundtables: std::sync::Mutex<std::collections::HashMap<String, tokio::sync::mpsc::Sender<String>>>,
 }
 
 type Shared = Arc<AppState>;
@@ -67,6 +75,7 @@ pub async fn run(paths: KbPaths, config: Config, port: u16) -> Result<(), KbErro
         paths,
         config,
         api_key,
+        roundtables: std::sync::Mutex::new(std::collections::HashMap::new()),
     });
 
     let app = router(state.clone());
@@ -108,6 +117,8 @@ fn router(state: Shared) -> Router {
         .route("/search", post(search))
         .route("/problems", post(problems))
         .route("/chat", post(chat))
+        .route("/brainstorm", post(brainstorm))
+        .route("/brainstorm/{session_id}/interject", post(interject))
         .route("/ideas", post(create_idea))
         .route("/reflections", post(create_reflection))
         .route("/compose/assist", post(compose_assist))
@@ -518,6 +529,79 @@ async fn chat(
     })
     .await?;
     Ok(Json(resp))
+}
+
+/// Brainstorming roundtable (multi-agent): a panel of specialist agents debates
+/// the objective across rounds — grounded in the corpus — streamed live as SSE.
+/// Each SSE event's data is one JSON `RoundtableEvent` (`type`-tagged), so the
+/// client renders turns as they arrive. The orchestrator runs in a spawned task
+/// and pushes events over a channel; this handler just streams the channel.
+///
+/// Requires the API key for whichever providers the panel's models use
+/// (`OPENAI_API_KEY` and/or `ANTHROPIC_API_KEY`); a missing key surfaces as an
+/// `error` event, not a failed request.
+async fn brainstorm(
+    State(state): State<Shared>,
+    Json(req): Json<BrainstormRequest>,
+) -> impl IntoResponse {
+    let (tx, rx) = tokio::sync::mpsc::channel::<roundtable::RoundtableEvent>(32);
+    // Side-channel for live interjections; registered under the client's session
+    // id so `POST /brainstorm/{id}/interject` can reach this run.
+    let (itx, irx) = tokio::sync::mpsc::channel::<String>(16);
+    let session_id = req.session_id.clone();
+    if let Some(ref sid) = session_id {
+        if let Ok(mut map) = state.roundtables.lock() {
+            map.insert(sid.clone(), itx);
+        }
+    }
+
+    let st = state.clone();
+    tokio::spawn(async move {
+        roundtable::run(&st.paths, &st.config, req, irx, tx).await;
+        // The run is over — drop the interjection sender so a stale id can't
+        // accumulate. (Steering after this point is a no-op.)
+        if let Some(sid) = session_id {
+            if let Ok(mut map) = st.roundtables.lock() {
+                map.remove(&sid);
+            }
+        }
+    });
+
+    let stream = ReceiverStream::new(rx).map(|ev| {
+        Event::default()
+            .json_data(&ev)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+    });
+    Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+#[derive(Deserialize)]
+struct InterjectRequest {
+    text: String,
+}
+
+/// Push a guiding idea into a running roundtable. The orchestrator drains it
+/// before the next agent speaks. 404 if the session isn't live (finished or
+/// never started); 202 once queued.
+async fn interject(
+    State(state): State<Shared>,
+    Path(session_id): Path<String>,
+    Json(req): Json<InterjectRequest>,
+) -> StatusCode {
+    let sender = state
+        .roundtables
+        .lock()
+        .ok()
+        .and_then(|map| map.get(&session_id).cloned());
+    match sender {
+        Some(tx) => {
+            // Clone the sender out before awaiting so we never hold the lock
+            // across the send.
+            let _ = tx.send(req.text).await;
+            StatusCode::ACCEPTED
+        }
+        None => StatusCode::NOT_FOUND,
+    }
 }
 
 #[derive(Deserialize)]

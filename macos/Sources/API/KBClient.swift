@@ -78,6 +78,17 @@ struct KBClient: Sendable {
         return r.message
     }
 
+    /// Save an idea note into the corpus (the engine re-embeds it, making it
+    /// searchable). Used to capture a roundtable's synthesis back into the KB.
+    @discardableResult
+    func createIdea(title: String, body: String, tags: [String] = [], links: [String] = [], project: String? = nil) async throws -> String {
+        struct Result: Decodable { var ok = false; var message = ""; var slug = "" }
+        var json: [String: Any] = ["title": title, "body": body, "tags": tags, "links": links]
+        if let project { json["project"] = project }
+        let r: Result = try await post("/ideas", json: json)
+        return r.message.isEmpty ? "Saved idea" : r.message
+    }
+
     func graph(neighbors: Int = 3) async throws -> GraphResponse {
         try await get("/graph", query: [.init(name: "neighbors", value: String(neighbors))])
     }
@@ -101,6 +112,67 @@ struct KBClient: Sendable {
         struct Chunk: Decodable { let text: String }
         let c: Chunk = try await get("/chunks/\(encode(chunkId))")
         return c.text
+    }
+
+    /// Stream a live brainstorming roundtable. The engine runs the panel of
+    /// agents and pushes `RoundtableEvent`s as Server-Sent Events; each yielded
+    /// value is one decoded event. `personas` is the wire payload (id/name/role/
+    /// model/is_synth/queries_kb) the macOS panel built. Cancelling the consuming
+    /// task tears down the HTTP connection.
+    func brainstorm(objective: String, personas: [[String: Any]], rounds: Int, sessionId: String,
+                    transcript: [String] = [], guidance: [String] = [], score: Bool = true,
+                    converge: Bool = true, moderated: Bool = false,
+                    targets: [String] = [], baseRound: Int? = nil) -> AsyncThrowingStream<RoundtableEvent, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    var req = request(path: "/brainstorm", method: "POST")
+                    req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                    req.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+                    req.timeoutInterval = 600
+                    var body: [String: Any] = [
+                        "objective": objective, "personas": personas, "rounds": rounds,
+                        "session_id": sessionId, "score": score, "converge": converge,
+                        "moderated": moderated,
+                    ]
+                    if !transcript.isEmpty { body["transcript"] = transcript }
+                    if !guidance.isEmpty { body["guidance"] = guidance }
+                    if !targets.isEmpty { body["targets"] = targets }
+                    if let baseRound { body["base_round"] = baseRound }
+                    req.httpBody = try JSONSerialization.data(withJSONObject: body)
+                    let (bytes, resp) = try await URLSession.shared.bytes(for: req)
+                    guard let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+                        throw KBError.server(status: (resp as? HTTPURLResponse)?.statusCode ?? -1,
+                                             message: "brainstorm request failed")
+                    }
+                    // Parse SSE. Each engine event is exactly one `data:` line of
+                    // JSON, so decode and yield per line — no dependence on the
+                    // blank separator line (which `.lines` may not surface).
+                    // Lines that aren't `data:` (`:` keep-alives, blanks) are skipped.
+                    for try await line in bytes.lines {
+                        guard line.hasPrefix("data:") else { continue }
+                        let json = line.dropFirst(5).drop(while: { $0 == " " })
+                        if let d = String(json).data(using: .utf8),
+                           let ev = try? Self.decoder.decode(RoundtableEvent.self, from: d) {
+                            continuation.yield(ev)
+                        }
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    /// Push a guiding idea into a running roundtable (best-effort — a finished
+    /// or unknown session just 404s, which we ignore).
+    func interject(sessionId: String, text: String) async {
+        var req = request(path: "/brainstorm/\(encode(sessionId))/interject", method: "POST")
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: ["text": text])
+        _ = try? await send(req)
     }
 
     // MARK: Plumbing

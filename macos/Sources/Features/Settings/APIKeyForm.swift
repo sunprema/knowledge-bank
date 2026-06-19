@@ -60,6 +60,57 @@ struct APIKeyForm: View {
     }
 }
 
+// Reusable Anthropic-key editor — optional, powers the Roundtable's Claude
+// agents. Mirrors APIKeyForm but writes the Anthropic Keychain account.
+struct AnthropicKeyForm: View {
+    @Environment(ServerController.self) private var server
+
+    @State private var text = ""
+    @State private var reveal = false
+
+    private var trimmed: String { text.trimmingCharacters(in: .whitespacesAndNewlines) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 6) {
+                Group {
+                    if reveal { TextField("sk-ant-…", text: $text) }
+                    else { SecureField("sk-ant-…", text: $text) }
+                }
+                .textFieldStyle(.roundedBorder)
+                .font(.body.monospaced())
+                Button { reveal.toggle() } label: {
+                    Image(systemName: reveal ? "eye.slash" : "eye")
+                }
+                .buttonStyle(.borderless)
+                .help(reveal ? "Hide" : "Show")
+            }
+
+            if server.hasAnthropicKey {
+                Label("A key is set — Roundtable agents can run on Claude models.",
+                      systemImage: "checkmark.seal.fill")
+                    .font(.caption).foregroundStyle(.green)
+            } else {
+                Text("Optional. Without it, Roundtable agents assigned a Claude model can't run — give them an OpenAI model instead. Stored in the macOS Keychain.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
+            HStack {
+                if server.hasAnthropicKey {
+                    Button("Remove", role: .destructive) { server.clearAnthropicKey() }
+                }
+                Spacer()
+                Button(server.hasAnthropicKey ? "Replace & Restart" : "Save & Restart") {
+                    server.setAnthropicKey(trimmed)
+                }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
+                .disabled(trimmed.isEmpty)
+            }
+        }
+    }
+}
+
 // First-run / on-demand onboarding presented as a sheet.
 struct KeyOnboardingSheet: View {
     @Environment(\.dismiss) private var dismiss
