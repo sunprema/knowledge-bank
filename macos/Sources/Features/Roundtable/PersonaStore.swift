@@ -31,11 +31,30 @@ final class PersonaStore {
     /// At least one synthesizer should exist; the engine runs it last.
     var hasSynthesizer: Bool { personas.contains { $0.isSynth } }
 
-    func add() {
-        personas.append(Persona(
-            name: "New Specialist", role: "Lens / Role",
-            icon: "person.fill.questionmark", colorName: "blue",
-            modelId: LLMModel.gpt4o.id, isSynth: false, queriesKB: true))
+    /// Create a fresh blank persona and return its id (so a UI can select it).
+    @discardableResult
+    func add() -> String {
+        let p = Persona(
+            name: "New Persona", role: "Lens / Role",
+            prompt: "", icon: "person.fill.questionmark", colorName: "blue",
+            modelId: LLMModel.opus.id, isSynth: false, queriesKB: true)
+        personas.append(p)
+        return p.id
+    }
+
+    /// Duplicate an existing persona (fresh id, "(copy)" name) and return its id.
+    @discardableResult
+    func duplicate(_ id: String) -> String? {
+        guard let src = personas.first(where: { $0.id == id }) else { return nil }
+        var copy = src
+        copy.id = UUID().uuidString
+        copy.name = "\(src.name) (copy)"
+        if let idx = personas.firstIndex(where: { $0.id == id }) {
+            personas.insert(copy, at: personas.index(after: idx))
+        } else {
+            personas.append(copy)
+        }
+        return copy.id
     }
 
     func delete(_ id: String) {

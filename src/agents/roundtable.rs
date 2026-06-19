@@ -122,6 +122,11 @@ pub struct PersonaSpec {
     pub id: String,
     pub name: String,
     pub role: String,
+    /// Free-form (markdown) instructions describing this persona to the model.
+    /// When non-empty it becomes the core of the system prompt; when empty the
+    /// engine falls back to a `role`-templated prompt (older clients send none).
+    #[serde(default)]
+    pub prompt: String,
     /// Wire model id, e.g. `claude-opus-4-8` or `gpt-4o`. Routes the provider.
     pub model: String,
     /// Runs last and produces the final synthesis.
@@ -145,15 +150,15 @@ pub struct PersonaSpec {
 impl PersonaSpec {
     fn default_panel() -> Vec<PersonaSpec> {
         vec![
-            PersonaSpec { id: "tech".into(), name: "Aria".into(), role: "Technologist".into(),
+            PersonaSpec { id: "tech".into(), name: "Aria".into(), role: "Technologist".into(), prompt: String::new(),
                 model: "claude-opus-4-8".into(), is_synth: false, is_fact_checker: false, queries_kb: true, tools: true },
-            PersonaSpec { id: "biz".into(), name: "Mateo".into(), role: "Business & GTM".into(),
+            PersonaSpec { id: "biz".into(), name: "Mateo".into(), role: "Business & GTM".into(), prompt: String::new(),
                 model: "gpt-4o".into(), is_synth: false, is_fact_checker: false, queries_kb: true, tools: false },
-            PersonaSpec { id: "skeptic".into(), name: "Nadia".into(), role: "Skeptic / Risk".into(),
+            PersonaSpec { id: "skeptic".into(), name: "Nadia".into(), role: "Skeptic / Risk".into(), prompt: String::new(),
                 model: "claude-sonnet-4-6".into(), is_synth: false, is_fact_checker: false, queries_kb: false, tools: false },
-            PersonaSpec { id: "factcheck".into(), name: "Vera".into(), role: "Fact-checker".into(),
+            PersonaSpec { id: "factcheck".into(), name: "Vera".into(), role: "Fact-checker".into(), prompt: String::new(),
                 model: "gpt-4o".into(), is_synth: false, is_fact_checker: true, queries_kb: true, tools: false },
-            PersonaSpec { id: "synth".into(), name: "Sol".into(), role: "Synthesizer".into(),
+            PersonaSpec { id: "synth".into(), name: "Sol".into(), role: "Synthesizer".into(), prompt: String::new(),
                 model: "claude-opus-4-8".into(), is_synth: true, is_fact_checker: false, queries_kb: true, tools: false },
         ]
     }
@@ -576,8 +581,9 @@ async fn run_turn(
 
 /// Route to the right provider by model id and run one completion. Claude models
 /// go through the Anthropic Messages API (no sampling params); everything else
-/// through OpenAI chat-completions.
-async fn complete(model: &str, messages: &[ChatMessage]) -> Result<String, KbError> {
+/// through OpenAI chat-completions. Shared with persona-driven chat
+/// (`retrieval::chat`) so there's a single provider-routing path.
+pub(crate) async fn complete(model: &str, messages: &[ChatMessage]) -> Result<String, KbError> {
     if model.starts_with("claude") {
         AnthropicChat::from_env(model)?.complete(messages).await
     } else {
@@ -590,7 +596,8 @@ async fn complete(model: &str, messages: &[ChatMessage]) -> Result<String, KbErr
 /// its own `kb_search` / `kb_get_paper` calls mid-turn (on top of the grounding
 /// already baked into `messages`) before producing its contribution. Bounded by
 /// [`MAX_TOOL_ITERS`]. Only valid for Claude models — the caller gates on that.
-async fn complete_tooled(
+/// Shared with persona-driven chat (`retrieval::chat`).
+pub(crate) async fn complete_tooled(
     paths: &KbPaths,
     config: &Config,
     model: &str,
@@ -621,7 +628,15 @@ async fn complete_tooled(
 }
 
 fn build_messages(persona: &PersonaSpec, round: usize, objective: &str, transcript: &[String], kb_context: &str, steering: &[String]) -> Vec<ChatMessage> {
-    let system = if persona.is_fact_checker {
+    // A persona's custom prompt (when set) describes its character/expertise; it
+    // leads the system message, followed by the role-appropriate task framing.
+    let persona_prefix = if persona.prompt.trim().is_empty() {
+        String::new()
+    } else {
+        format!("{}\n\n", persona.prompt.trim())
+    };
+
+    let task = if persona.is_fact_checker {
         format!(
             "You are {name}, the fact-checker on a brainstorming roundtable. Review the key \
              factual and empirical claims made in the discussion. Using ONLY the knowledge-bank \
@@ -649,6 +664,7 @@ fn build_messages(persona: &PersonaSpec, round: usize, objective: &str, transcri
             name = persona.name, role = persona.role,
         )
     };
+    let system = format!("{persona_prefix}{task}");
 
     let mut user = format!("Objective: {objective}\n\n");
     if transcript.is_empty() {
@@ -788,7 +804,7 @@ async fn run_moderated(
                 recruits_left -= 1;
                 let id = unique_id(&name, &panel);
                 let p = PersonaSpec {
-                    id: id.clone(), name: name.clone(), role: role.clone(),
+                    id: id.clone(), name: name.clone(), role: role.clone(), prompt: String::new(),
                     model: moderator_model.to_string(),
                     is_synth: false, is_fact_checker: false, queries_kb: true, tools: false,
                 };
@@ -989,12 +1005,26 @@ mod tests {
     #[test]
     fn fact_checker_prompt_asks_to_verify() {
         let p = PersonaSpec {
-            id: "fc".into(), name: "Vera".into(), role: "Fact-checker".into(),
+            id: "fc".into(), name: "Vera".into(), role: "Fact-checker".into(), prompt: String::new(),
             model: "gpt-4o".into(), is_synth: false, is_fact_checker: true, queries_kb: true, tools: false,
         };
         let msgs = build_messages(&p, 1, "x", &["**A**: a claim".to_string()], "- \"src\" (method): foo\n", &[]);
         assert!(msgs[0].content.contains("fact-checker"));
         assert!(msgs[1].content.contains("fact-check"));
+    }
+
+    #[test]
+    fn custom_prompt_leads_the_system_message() {
+        // A persona's free-form prompt prefixes the role task framing.
+        let mut p = PersonaSpec::default_panel()[0].clone();
+        p.prompt = "You are a wry historian who reasons by analogy to the printing press.".into();
+        let msgs = build_messages(&p, 1, "an AI study tool", &[], "", &[]);
+        assert!(msgs[0].content.contains("printing press"), "got: {}", msgs[0].content);
+        // The role framing is still appended after the custom prompt.
+        assert!(msgs[0].content.contains("roundtable"));
+        // Empty prompt ⇒ no leading blank, just the role template.
+        let plain = build_messages(&PersonaSpec::default_panel()[0], 1, "x", &[], "", &[]);
+        assert!(plain[0].content.starts_with("You are Aria"));
     }
 
     #[test]
@@ -1033,7 +1063,7 @@ mod tests {
     #[test]
     fn unique_id_avoids_collisions() {
         let panel = vec![PersonaSpec {
-            id: "reg".into(), name: "Reg".into(), role: "r".into(), model: "m".into(),
+            id: "reg".into(), name: "Reg".into(), role: "r".into(), prompt: String::new(), model: "m".into(),
             is_synth: false, is_fact_checker: false, queries_kb: true, tools: false,
         }];
         assert_eq!(unique_id("Reg!", &panel), "reg2");

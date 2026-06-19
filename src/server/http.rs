@@ -513,6 +513,10 @@ struct ChatRequest {
     query: String,
     #[serde(default)]
     history: Vec<ChatMessage>,
+    /// Optional persona to answer in (the `@persona` chat mode). Absent ⇒ the
+    /// default research-assistant chat on the configured model.
+    #[serde(default)]
+    persona: Option<retrieval::PersonaChat>,
 }
 
 /// Chat-over-corpus: wide-retrieve context, answer with the chat model, return
@@ -525,7 +529,7 @@ async fn chat(
     let paths = state.paths.clone();
     let config = state.config.clone();
     let resp = run_blocking(move || async move {
-        retrieval::chat(&paths, &config, &req.query, &req.history).await
+        retrieval::chat(&paths, &config, &req.query, &req.history, req.persona.as_ref()).await
     })
     .await?;
     Ok(Json(resp))

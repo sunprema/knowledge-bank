@@ -8,6 +8,9 @@ import SwiftUI
 struct KBApp: App {
     @State private var server = ServerController()
     @State private var speech = SpeechController()
+    // The persona library — one shared, persisted store used by the Personas
+    // section, the Roundtable, and @persona chat.
+    @State private var personaStore = PersonaStore()
 
     var body: some Scene {
         // Single identified window so the menu-bar item can reliably focus or
@@ -16,6 +19,7 @@ struct KBApp: App {
             RootView()
                 .environment(server)
                 .environment(speech)
+                .environment(personaStore)
                 .frame(minWidth: 900, idealWidth: 1180, maxWidth: .infinity,
                        minHeight: 600, idealHeight: 760, maxHeight: .infinity)
                 .onAppear { server.start() }
