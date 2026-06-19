@@ -24,5 +24,9 @@
     <string>NSApplication</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <!-- Menu-bar-only app: no Dock icon, no app menu. KB lives in the menu bar
+         (MenuBarExtra); its window is opened from there or on launch. -->
+    <key>LSUIElement</key>
+    <true/>
 </dict>
 </plist>

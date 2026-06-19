@@ -14,6 +14,7 @@ final class ServerController {
         case starting(String)         // status line for the launch screen
         case ready(KBClient)
         case failed(String)
+        case stopped                  // engine deliberately stopped (menu bar)
     }
 
     private(set) var phase: Phase = .starting("Locating engine…")
@@ -114,7 +115,19 @@ final class ServerController {
     private var isLaunching = false
 
     func start() {
-        Task { await launch() }
+        Task {
+            if case .ready = phase {} else { phase = .starting("Starting engine…") }
+            await launch()
+        }
+    }
+
+    /// Stop the engine and stay stopped until the user starts it again — backs
+    /// the menu bar's "Stop Engine" control.
+    func stop() {
+        Task {
+            await stopEngine()
+            phase = .stopped
+        }
     }
 
     private func launch() async {
