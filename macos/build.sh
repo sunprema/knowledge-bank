@@ -67,24 +67,26 @@ else
     echo "  ⚠ no kb binary found under target/ — app will fall back to the dev path at runtime"
 fi
 
-# Codesign. A *stable* identity (set KB_SIGN_IDENTITY to a code-signing cert in
-# your Keychain) keeps the app's signature constant across rebuilds, so the
-# Keychain "Always Allow" sticks. Falling back to ad-hoc ("-") re-signs uniquely
-# each build, which makes macOS re-prompt for the OpenAI key every launch.
-# Default to ad-hoc. A stable identity (KB_SIGN_IDENTITY) fixes the Keychain
-# re-prompt, but on macOS it makes the app subject to TCC for external volumes
-# (e.g. /Volumes/x) — which then needs Full Disk Access granted to KB.app.
+# Codesign. Ad-hoc ("-") by default: the app reads its API keys from the
+# environment (see run.sh) and never touches the Keychain, so there's no
+# "Always Allow" grant to preserve and a per-build signature is fine. Set
+# KB_SIGN_IDENTITY to a Keychain code-signing cert only if you specifically need
+# a stable signature (e.g. distribution). Sign inside-out: engine, sidecar, app.
 SIGN_ID="${KB_SIGN_IDENTITY:--}"
-# Sign the bundled engine and sidecar first, then the app (inside-out).
-[ -f "$APP/Contents/Resources/kb" ] && codesign --force --sign "$SIGN_ID" "$APP/Contents/Resources/kb" >/dev/null 2>&1
-[ -f "$APP/Contents/Resources/kb-ocr" ] && codesign --force --sign "$SIGN_ID" "$APP/Contents/Resources/kb-ocr" >/dev/null 2>&1
-if codesign --force --sign "$SIGN_ID" "$APP" >/dev/null 2>&1; then
-    if [ "$SIGN_ID" = "-" ]; then
-        echo "  ⚠ ad-hoc signed — Keychain 'Always Allow' won't persist across rebuilds."
-        echo "    Create a self-signed Code Signing cert and run: export KB_SIGN_IDENTITY=\"<cert name>\""
-    else
-        echo "› signed with stable identity: $SIGN_ID"
+# Sign the whole bundle in one --deep pass. On external volumes (/Volumes/x) the
+# just-copied 21MB engine may not be fully flushed when codesign enumerates the
+# bundle, producing an inconsistent seal — so flush and retry a couple of times.
+sync
+signed=""
+for attempt in 1 2 3; do
+    if codesign --force --deep --sign "$SIGN_ID" "$APP" 2>/dev/null \
+       && codesign --verify "$APP" 2>/dev/null; then
+        signed=1; break
     fi
+    sync; sleep 0.5
+done
+if [ -n "$signed" ]; then
+    [ "$SIGN_ID" = "-" ] && echo "› ad-hoc signed" || echo "› signed with identity: $SIGN_ID"
 else
     echo "  (codesign failed — unsigned bundle still launches locally)"
 fi

@@ -87,6 +87,12 @@ private struct PersonaEditorCard: View {
                         .toggleStyle(.checkbox)
                     Toggle(isOn: $persona.isSynth) { Text("Synthesizer").font(.caption) }
                         .toggleStyle(.checkbox)
+                    Toggle(isOn: $persona.tools) { Text("Tools").font(.caption) }
+                        .toggleStyle(.checkbox)
+                        .disabled(!persona.modelId.hasPrefix("claude"))
+                        .help(persona.modelId.hasPrefix("claude")
+                              ? "Let this agent search the corpus live (kb_search / kb_get_paper) during its turn"
+                              : "Tools require a Claude model (Anthropic tool-use)")
                 }
             }
         }

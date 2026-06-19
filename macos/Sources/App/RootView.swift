@@ -14,7 +14,28 @@ struct RootView: View {
         case .ready(let client):
             MainView(client: client)
                 .transition(.opacity)
+        case .stopped:
+            StoppedView()
         }
+    }
+}
+
+private struct StoppedView: View {
+    @Environment(ServerController.self) private var server
+    var body: some View {
+        VStack(spacing: 16) {
+            Image(systemName: "stop.circle.fill")
+                .font(.system(size: 44)).foregroundStyle(.secondary)
+            Text("Engine stopped").font(.title2.weight(.semibold))
+            Text("The `kb serve` engine isn't running. Start it to search, chat, and run roundtables.")
+                .font(.callout).foregroundStyle(.secondary)
+                .multilineTextAlignment(.center).frame(maxWidth: 420)
+            Button("Start Engine") { server.start() }
+                .buttonStyle(.borderedProminent)
+        }
+        .padding(40)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(.background)
     }
 }
 

@@ -254,7 +254,9 @@ fn str_list(args: &Value, key: &str) -> Option<Vec<String>> {
     }
 }
 
-async fn tool_search(paths: &KbPaths, config: &Config, args: &Value) -> Result<String, KbError> {
+/// Run the `kb_search` tool. `pub(crate)` so the in-process agent harness can
+/// reuse the exact same arg-parsing and search logic the MCP server exposes.
+pub(crate) async fn tool_search(paths: &KbPaths, config: &Config, args: &Value) -> Result<String, KbError> {
     let query = str_arg(args, "query")?;
     let mode = match args.get("mode").and_then(|m| m.as_str()).unwrap_or("narrow") {
         "wide" => SearchMode::Wide,
@@ -328,7 +330,8 @@ async fn tool_find_problems(
         .map_err(|e| KbError::Index(format!("serialize results: {e}")))
 }
 
-fn tool_get_paper(paths: &KbPaths, args: &Value) -> Result<String, KbError> {
+/// Run the `kb_get_paper` tool. `pub(crate)` for reuse by the agent harness.
+pub(crate) fn tool_get_paper(paths: &KbPaths, args: &Value) -> Result<String, KbError> {
     let paper_id = str_arg(args, "paper_id")?;
     let meta_path = paths.metadata_path(&paper_id);
     if !meta_path.exists() {
@@ -402,7 +405,9 @@ async fn tool_capture_idea(
         .map_err(|e| KbError::Index(format!("serialize result: {e}")))
 }
 
-async fn tool_create_reflection(
+/// Run the `kb_create_reflection` tool. `pub(crate)` for reuse by the agent
+/// harness — the one writer in the in-process tool set.
+pub(crate) async fn tool_create_reflection(
     paths: &KbPaths,
     config: &Config,
     args: &Value,

@@ -5,4 +5,5 @@
 //! bank, and emits a live event stream so a UI can render the discussion as it
 //! unfolds (the macOS app's Roundtable canvas).
 
+pub mod harness;
 pub mod roundtable;

@@ -86,11 +86,16 @@ struct Persona: Identifiable, Codable, Hashable {
     var isFactChecker: Bool
     /// Pulls grounding from the corpus before speaking.
     var queriesKB: Bool
+    /// Grants live tool access: the persona can search the corpus and fetch
+    /// papers mid-turn via the agent harness. Only takes effect on Claude models
+    /// (tool-use is Anthropic-only); ignored for OpenAI personas.
+    var tools: Bool
 
     init(id: String = UUID().uuidString,
          name: String, role: String, icon: String,
          colorName: String, modelId: String,
-         isSynth: Bool = false, isFactChecker: Bool = false, queriesKB: Bool = true) {
+         isSynth: Bool = false, isFactChecker: Bool = false, queriesKB: Bool = true,
+         tools: Bool = false) {
         self.id = id
         self.name = name
         self.role = role
@@ -100,11 +105,12 @@ struct Persona: Identifiable, Codable, Hashable {
         self.isSynth = isSynth
         self.isFactChecker = isFactChecker
         self.queriesKB = queriesKB
+        self.tools = tools
     }
 
     // Tolerant decode so panels/records saved before a field existed still load.
     enum CodingKeys: String, CodingKey {
-        case id, name, role, icon, colorName, modelId, isSynth, isFactChecker, queriesKB
+        case id, name, role, icon, colorName, modelId, isSynth, isFactChecker, queriesKB, tools
     }
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -117,6 +123,7 @@ struct Persona: Identifiable, Codable, Hashable {
         isSynth = try c.decodeIfPresent(Bool.self, forKey: .isSynth) ?? false
         isFactChecker = try c.decodeIfPresent(Bool.self, forKey: .isFactChecker) ?? false
         queriesKB = try c.decodeIfPresent(Bool.self, forKey: .queriesKB) ?? true
+        tools = try c.decodeIfPresent(Bool.self, forKey: .tools) ?? false
     }
 
     var color: Color { PersonaPalette.color(colorName) }
@@ -132,7 +139,7 @@ struct Persona: Identifiable, Codable, Hashable {
 
     static let defaultPanel: [Persona] = [
         Persona(id: "tech",    name: "Aria",  role: "Technologist",
-                icon: "cpu", colorName: "purple", modelId: LLMModel.opus.id, queriesKB: true),
+                icon: "cpu", colorName: "purple", modelId: LLMModel.opus.id, queriesKB: true, tools: true),
         Persona(id: "biz",     name: "Mateo", role: "Business & GTM",
                 icon: "chart.line.uptrend.xyaxis", colorName: "green", modelId: LLMModel.gpt4o.id, queriesKB: true),
         Persona(id: "skeptic", name: "Nadia", role: "Skeptic / Risk",
@@ -146,7 +153,8 @@ struct Persona: Identifiable, Codable, Hashable {
     /// Wire payload the engine expects for one persona.
     var wirePayload: [String: Any] {
         ["id": id, "name": name, "role": role, "model": modelId,
-         "is_synth": isSynth, "is_fact_checker": isFactChecker, "queries_kb": queriesKB]
+         "is_synth": isSynth, "is_fact_checker": isFactChecker, "queries_kb": queriesKB,
+         "tools": tools]
     }
 }
 
