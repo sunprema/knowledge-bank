@@ -17,7 +17,8 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::{Receiver, Sender};
 
-use crate::anthropic::AnthropicChat;
+use crate::agents::harness::{kb_tools, run_agent};
+use crate::anthropic::{AgentMessage, AnthropicChat, ContentBlock};
 use crate::chat::{ChatMessage, OpenAiChat};
 use crate::config::{Config, KbPaths};
 use crate::embed::OpenAiEmbedder;
@@ -38,6 +39,10 @@ const TURN_RETRIES: usize = 2;
 const TURN_RETRY_BACKOFF_MS: [u64; 2] = [800, 1600];
 /// Most specialists the moderator may recruit beyond the starting panel.
 const MAX_RECRUITS: usize = 3;
+/// Model calls a tool-enabled persona may make in one turn before the harness
+/// forces a final answer — bounds a self-directed search loop (typically 1–2
+/// searches then speak; the cap guards against a runaway).
+const MAX_TOOL_ITERS: usize = 6;
 
 /// Cosine-similarity threshold (per agent, round-over-round) above which the
 /// debate is considered to have converged — agents are restating, so we stop
@@ -129,21 +134,27 @@ pub struct PersonaSpec {
     /// Pulls grounding from the corpus before speaking.
     #[serde(default)]
     pub queries_kb: bool,
+    /// Grants live tool access: the persona can actively search the corpus
+    /// (and fetch papers) mid-turn via the agent harness, on top of any
+    /// pre-fetched grounding. Read-only — no KB writes. Only takes effect on
+    /// Claude models (tool-use is Anthropic-only); ignored for OpenAI personas.
+    #[serde(default)]
+    pub tools: bool,
 }
 
 impl PersonaSpec {
     fn default_panel() -> Vec<PersonaSpec> {
         vec![
             PersonaSpec { id: "tech".into(), name: "Aria".into(), role: "Technologist".into(),
-                model: "claude-opus-4-8".into(), is_synth: false, is_fact_checker: false, queries_kb: true },
+                model: "claude-opus-4-8".into(), is_synth: false, is_fact_checker: false, queries_kb: true, tools: true },
             PersonaSpec { id: "biz".into(), name: "Mateo".into(), role: "Business & GTM".into(),
-                model: "gpt-4o".into(), is_synth: false, is_fact_checker: false, queries_kb: true },
+                model: "gpt-4o".into(), is_synth: false, is_fact_checker: false, queries_kb: true, tools: false },
             PersonaSpec { id: "skeptic".into(), name: "Nadia".into(), role: "Skeptic / Risk".into(),
-                model: "claude-sonnet-4-6".into(), is_synth: false, is_fact_checker: false, queries_kb: false },
+                model: "claude-sonnet-4-6".into(), is_synth: false, is_fact_checker: false, queries_kb: false, tools: false },
             PersonaSpec { id: "factcheck".into(), name: "Vera".into(), role: "Fact-checker".into(),
-                model: "gpt-4o".into(), is_synth: false, is_fact_checker: true, queries_kb: true },
+                model: "gpt-4o".into(), is_synth: false, is_fact_checker: true, queries_kb: true, tools: false },
             PersonaSpec { id: "synth".into(), name: "Sol".into(), role: "Synthesizer".into(),
-                model: "claude-opus-4-8".into(), is_synth: true, is_fact_checker: false, queries_kb: true },
+                model: "claude-opus-4-8".into(), is_synth: true, is_fact_checker: false, queries_kb: true, tools: false },
         ]
     }
 }
@@ -513,9 +524,17 @@ async fn run_turn(
     // 2. Build the prompt and call this persona's model, retrying transient
     //    failures a couple of times. Auth/config errors fail fast.
     let messages = build_messages(persona, round, objective, transcript, &kb_context, steering);
+    // Tool-enabled Claude personas drive their own corpus lookups mid-turn; all
+    // others take the plain single-shot path (tool-use is Anthropic-only).
+    let use_tools = persona.tools && persona.model.starts_with("claude");
     let mut attempt = 0usize;
     let result = loop {
-        match complete(&persona.model, &messages).await {
+        let turn = if use_tools {
+            complete_tooled(paths, config, &persona.model, &messages).await
+        } else {
+            complete(&persona.model, &messages).await
+        };
+        match turn {
             Ok(text) => break Ok(text),
             Err(e) => {
                 if !is_retryable(&e) || attempt >= TURN_RETRIES {
@@ -564,6 +583,41 @@ async fn complete(model: &str, messages: &[ChatMessage]) -> Result<String, KbErr
     } else {
         OpenAiChat::from_env(model)?.complete(messages, OPENAI_TEMPERATURE).await
     }
+}
+
+/// Tool-enabled completion for a Claude persona: runs the same prompt through
+/// the agent harness with the read-only corpus tools, so the model can issue
+/// its own `kb_search` / `kb_get_paper` calls mid-turn (on top of the grounding
+/// already baked into `messages`) before producing its contribution. Bounded by
+/// [`MAX_TOOL_ITERS`]. Only valid for Claude models — the caller gates on that.
+async fn complete_tooled(
+    paths: &KbPaths,
+    config: &Config,
+    model: &str,
+    messages: &[ChatMessage],
+) -> Result<String, KbError> {
+    let client = AnthropicChat::from_env(model)?;
+    // The Messages API takes `system` separately; lift it out and convert the
+    // remaining turns into structured `AgentMessage`s for the tool loop.
+    let system = messages
+        .iter()
+        .filter(|m| m.role == "system")
+        .map(|m| m.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let turns: Vec<AgentMessage> = messages
+        .iter()
+        .filter(|m| m.role == "user" || m.role == "assistant")
+        .map(|m| {
+            if m.role == "assistant" {
+                AgentMessage::assistant(vec![ContentBlock::text(&m.content)])
+            } else {
+                AgentMessage::user_text(&m.content)
+            }
+        })
+        .collect();
+    let registry = kb_tools::kb_registry_readonly(paths, config);
+    run_agent(&client, &system, turns, &registry, MAX_TOOL_ITERS).await
 }
 
 fn build_messages(persona: &PersonaSpec, round: usize, objective: &str, transcript: &[String], kb_context: &str, steering: &[String]) -> Vec<ChatMessage> {
@@ -736,7 +790,7 @@ async fn run_moderated(
                 let p = PersonaSpec {
                     id: id.clone(), name: name.clone(), role: role.clone(),
                     model: moderator_model.to_string(),
-                    is_synth: false, is_fact_checker: false, queries_kb: true,
+                    is_synth: false, is_fact_checker: false, queries_kb: true, tools: false,
                 };
                 if tx.send(RoundtableEvent::Recruited {
                     persona_id: id, name, role,
@@ -936,7 +990,7 @@ mod tests {
     fn fact_checker_prompt_asks_to_verify() {
         let p = PersonaSpec {
             id: "fc".into(), name: "Vera".into(), role: "Fact-checker".into(),
-            model: "gpt-4o".into(), is_synth: false, is_fact_checker: true, queries_kb: true,
+            model: "gpt-4o".into(), is_synth: false, is_fact_checker: true, queries_kb: true, tools: false,
         };
         let msgs = build_messages(&p, 1, "x", &["**A**: a claim".to_string()], "- \"src\" (method): foo\n", &[]);
         assert!(msgs[0].content.contains("fact-checker"));
@@ -980,7 +1034,7 @@ mod tests {
     fn unique_id_avoids_collisions() {
         let panel = vec![PersonaSpec {
             id: "reg".into(), name: "Reg".into(), role: "r".into(), model: "m".into(),
-            is_synth: false, is_fact_checker: false, queries_kb: true,
+            is_synth: false, is_fact_checker: false, queries_kb: true, tools: false,
         }];
         assert_eq!(unique_id("Reg!", &panel), "reg2");
         assert_eq!(unique_id("Dana", &panel), "dana");
@@ -1029,5 +1083,22 @@ mod tests {
     fn truncate_respects_char_boundaries() {
         assert_eq!(truncate("hello", 10), "hello");
         assert_eq!(truncate("hello world", 5), "hello…");
+    }
+
+    #[test]
+    fn persona_tools_flag_defaults_off_and_parses() {
+        // Absent ⇒ false, so an old client (no `tools` field) is unaffected.
+        let p: PersonaSpec = serde_json::from_str(
+            r#"{"id":"a","name":"A","role":"r","model":"claude-opus-4-8"}"#,
+        ).expect("parse");
+        assert!(!p.tools);
+        // Present ⇒ honored (the macOS checkbox sends it).
+        let t: PersonaSpec = serde_json::from_str(
+            r#"{"id":"a","name":"A","role":"r","model":"claude-opus-4-8","tools":true}"#,
+        ).expect("parse");
+        assert!(t.tools);
+        // The default panel ships the Technologist with tools on as a live demo.
+        let tech = PersonaSpec::default_panel().into_iter().find(|p| p.id == "tech").unwrap();
+        assert!(tech.tools);
     }
 }
