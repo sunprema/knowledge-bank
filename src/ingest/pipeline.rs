@@ -9,7 +9,7 @@ use crate::config::{Config, KbPaths};
 use crate::embed::OpenAiEmbedder;
 use crate::index::{MetaDb, NewChunk, VectorIndex};
 use crate::ingest::latex::EprintContent;
-use crate::ingest::{arxiv, html, latex, pdf, sections};
+use crate::ingest::{arxiv, html, latex, ocr, pdf, sections};
 use crate::{
     content_hash, make_snippet, now_rfc3339, DocKind, KbError, PaperMetadata, RawChunk,
     SectionType, SourceFormat, EMBEDDING_VERSION,
@@ -922,13 +922,69 @@ fn assign_pages(chunks: &[RawChunk], toc: &[crate::TocEntry]) -> Vec<Option<u32>
     out
 }
 
+/// A page whose extracted text is shorter than this (after trimming) is
+/// treated as having no real text layer — a scanned/figure-only page that's a
+/// candidate for OCR. Tuned to ignore stray headers/page numbers `pdf_extract`
+/// sometimes recovers from otherwise-image pages.
+const MIN_TEXT_CHARS: usize = 24;
+
 fn write_sections_from_pdf(pdf_path: &Path, sections_path: &Path) -> Result<(), KbError> {
-    let pages = pdf::extract_text_per_page(pdf_path)?;
+    // An image-only PDF may have no text layer at all — `extract_text_per_page`
+    // can then error. Before giving up, fall through to OCR with blank pages.
+    let mut pages = match pdf::extract_text_per_page(pdf_path) {
+        Ok(pages) => pages,
+        Err(e) => {
+            let n = pdf::page_count(pdf_path).map_err(|_| e)?;
+            tracing::warn!("no PDF text layer; attempting OCR on all {n} page(s)");
+            vec![String::new(); n]
+        }
+    };
+
+    ocr_blank_pages(pdf_path, &mut pages);
+
     let mut md = String::new();
     for (i, text) in pages.iter().enumerate() {
         md.push_str(&format!("## Page {}\n\n{}\n\n", i + 1, text.trim()));
     }
     std::fs::write(sections_path, md).map_err(|e| io_err("write sections.md", e))
+}
+
+/// Recover text for pages with no text layer via the `kb-ocr` sidecar, in
+/// place. Best-effort: with no helper (non-macOS, or a build without it) or on
+/// OCR failure, the blank pages stay blank — never fatal to ingest.
+fn ocr_blank_pages(pdf_path: &Path, pages: &mut [String]) {
+    let blanks: Vec<usize> = pages
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| t.trim().chars().count() < MIN_TEXT_CHARS)
+        .map(|(i, _)| i)
+        .collect();
+    if blanks.is_empty() {
+        return;
+    }
+
+    let Some(helper) = ocr::locate_helper() else {
+        tracing::info!(
+            "{} page(s) lack a text layer; no kb-ocr helper available, leaving them blank",
+            blanks.len()
+        );
+        return;
+    };
+
+    let pages_1indexed: Vec<usize> = blanks.iter().map(|i| i + 1).collect();
+    match ocr::run(&helper, pdf_path, &pages_1indexed) {
+        Ok(recovered) => {
+            let mut filled = 0usize;
+            for (page_1, text) in recovered {
+                if page_1 >= 1 && page_1 <= pages.len() && !text.trim().is_empty() {
+                    pages[page_1 - 1] = text;
+                    filled += 1;
+                }
+            }
+            tracing::info!("OCR recovered text for {filled}/{} page(s)", blanks.len());
+        }
+        Err(e) => tracing::warn!("OCR failed ({e}); leaving {} page(s) blank", blanks.len()),
+    }
 }
 
 /// Create the notes template if absent (PRD §4 step 7; prompts live in
