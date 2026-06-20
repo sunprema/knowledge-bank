@@ -68,10 +68,10 @@ else
 fi
 
 # Codesign. Ad-hoc ("-") by default: the app reads its API keys from the
-# environment (see run.sh) and never touches the Keychain, so there's no
-# "Always Allow" grant to preserve and a per-build signature is fine. Set
-# KB_SIGN_IDENTITY to a Keychain code-signing cert only if you specifically need
-# a stable signature (e.g. distribution). Sign inside-out: engine, sidecar, app.
+# environment (see run.sh / "Launch KB.app") and never touches the Keychain, so
+# there's no "Always Allow" grant to preserve and a per-build signature is fine.
+# Set KB_SIGN_IDENTITY to a Keychain code-signing cert only if you specifically
+# need a stable signature (e.g. distribution). Sign inside-out: engine, sidecar, app.
 SIGN_ID="${KB_SIGN_IDENTITY:--}"
 # Sign the whole bundle in one --deep pass. On external volumes (/Volumes/x) the
 # just-copied 21MB engine may not be fully flushed when codesign enumerates the
