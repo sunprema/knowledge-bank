@@ -774,13 +774,36 @@ const DEFAULT_CHAT_SYSTEM: &str =
      [2][3]. Be concise and precise. If the sources don't contain enough to answer, say so \
      plainly rather than guessing.";
 
-pub async fn chat(
+/// Canned reply when retrieval turns up nothing relevant (no model call).
+const NO_CHAT_RESULTS: &str =
+    "I couldn't find anything in your knowledge base relevant to that question.";
+
+/// How a prepared chat should be completed.
+enum ChatRoute {
+    /// Default research-assistant chat on the configured OpenAI model + temperature.
+    Default,
+    /// A persona's model; `tooled` ⇒ run the read-only corpus tool loop (Claude only).
+    Persona { model: String, tooled: bool },
+}
+
+/// Everything needed to produce a chat answer after retrieval: the cited
+/// sources, the assembled message list, and how to route the completion. Shared
+/// by [`chat`] and [`chat_stream`] so retrieval/prompt assembly lives once.
+struct ChatPrep {
+    sources: Vec<ChatSource>,
+    messages: Vec<ChatMessage>,
+    route: ChatRoute,
+}
+
+/// Wide-retrieve context and assemble the prompt. `Ok(None)` ⇒ nothing relevant
+/// was found (the caller answers with [`NO_CHAT_RESULTS`], no model call).
+async fn prepare_chat(
     paths: &KbPaths,
     config: &Config,
     query: &str,
     history: &[ChatMessage],
     persona: Option<&PersonaChat>,
-) -> Result<ChatResponse, KbError> {
+) -> Result<Option<ChatPrep>, KbError> {
     let query = query.trim();
     if query.is_empty() {
         return Err(KbError::Usage("chat query is empty".into()));
@@ -808,11 +831,7 @@ pub async fn chat(
     flat.truncate(k);
 
     if flat.is_empty() {
-        return Ok(ChatResponse {
-            answer: "I couldn't find anything in your knowledge base relevant to that question."
-                .to_string(),
-            sources: Vec::new(),
-        });
+        return Ok(None);
     }
 
     // The search response carries only snippets; hydrate full chunk text so the
@@ -867,28 +886,107 @@ pub async fn chat(
     messages.push(ChatMessage::user(format!("Question: {query}\n\nSources:\n{context}")));
 
     // Route to the persona's model when addressed (Claude → Anthropic, optionally
-    // with live read-only corpus tools; otherwise OpenAI), else the default chat
-    // model with its configured temperature.
-    let answer = match persona {
+    // with live read-only corpus tools; otherwise OpenAI), else the default chat.
+    let route = match persona {
         Some(p) => {
             let model = if p.model.trim().is_empty() {
                 config.chat.model.clone()
             } else {
                 p.model.clone()
             };
-            if p.tools && model.starts_with("claude") {
-                crate::agents::roundtable::complete_tooled(paths, config, &model, &messages).await?
-            } else {
-                crate::agents::roundtable::complete(&model, &messages).await?
-            }
+            let tooled = p.tools && model.starts_with("claude");
+            ChatRoute::Persona { model, tooled }
         }
-        None => {
+        None => ChatRoute::Default,
+    };
+
+    Ok(Some(ChatPrep { sources, messages, route }))
+}
+
+pub async fn chat(
+    paths: &KbPaths,
+    config: &Config,
+    query: &str,
+    history: &[ChatMessage],
+    persona: Option<&PersonaChat>,
+) -> Result<ChatResponse, KbError> {
+    let Some(prep) = prepare_chat(paths, config, query, history, persona).await? else {
+        return Ok(ChatResponse { answer: NO_CHAT_RESULTS.to_string(), sources: Vec::new() });
+    };
+
+    let answer = match prep.route {
+        ChatRoute::Default => {
             let client = OpenAiChat::from_env(&config.chat.model)?;
-            client.complete(&messages, config.chat.temperature).await?
+            client.complete(&prep.messages, config.chat.temperature).await?
+        }
+        ChatRoute::Persona { model, tooled } => {
+            if tooled {
+                crate::agents::roundtable::complete_tooled(paths, config, &model, &prep.messages).await?
+            } else {
+                crate::agents::roundtable::complete(&model, &prep.messages).await?
+            }
         }
     };
 
-    Ok(ChatResponse { answer, sources })
+    Ok(ChatResponse { answer, sources: prep.sources })
+}
+
+/// An event emitted while streaming a chat answer over the corpus.
+pub enum ChatStreamEvent {
+    /// The cited sources, available as soon as retrieval finishes (before any
+    /// answer token). Emitted exactly once.
+    Sources(Vec<ChatSource>),
+    /// A fragment of the answer text, in order.
+    Delta(String),
+}
+
+/// Streaming sibling of [`chat`]: retrieves, emits the sources, then streams the
+/// answer to `on_event` token-by-token. Tooled personas run the (non-streamed)
+/// tool loop and deliver their whole answer as a single [`Delta`]. Returns the
+/// final [`ChatResponse`] (full answer + sources) once complete.
+///
+/// [`Delta`]: ChatStreamEvent::Delta
+pub async fn chat_stream<F: FnMut(ChatStreamEvent)>(
+    paths: &KbPaths,
+    config: &Config,
+    query: &str,
+    history: &[ChatMessage],
+    persona: Option<&PersonaChat>,
+    mut on_event: F,
+) -> Result<ChatResponse, KbError> {
+    let Some(prep) = prepare_chat(paths, config, query, history, persona).await? else {
+        let answer = NO_CHAT_RESULTS.to_string();
+        on_event(ChatStreamEvent::Delta(answer.clone()));
+        return Ok(ChatResponse { answer, sources: Vec::new() });
+    };
+
+    on_event(ChatStreamEvent::Sources(prep.sources.clone()));
+
+    let answer = match prep.route {
+        ChatRoute::Default => {
+            let client = OpenAiChat::from_env(&config.chat.model)?;
+            client
+                .complete_stream(&prep.messages, config.chat.temperature, |d| {
+                    on_event(ChatStreamEvent::Delta(d.to_string()))
+                })
+                .await?
+        }
+        ChatRoute::Persona { model, tooled } => {
+            if tooled {
+                // The tool loop isn't streamed; deliver the whole answer at once.
+                let text = crate::agents::roundtable::complete_tooled(paths, config, &model, &prep.messages).await?;
+                on_event(ChatStreamEvent::Delta(text.clone()));
+                text
+            } else {
+                crate::agents::roundtable::complete_stream(&model, &prep.messages, |d| {
+                    on_event(ChatStreamEvent::Delta(d.to_string()))
+                })
+                .await?
+            }
+        }
+    };
+
+    Ok(ChatResponse { answer, sources: prep.sources })
 }
 
 /// Co-author assist: search the KB for content related to the draft + message,

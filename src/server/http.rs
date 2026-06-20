@@ -117,6 +117,7 @@ fn router(state: Shared) -> Router {
         .route("/search", post(search))
         .route("/problems", post(problems))
         .route("/chat", post(chat))
+        .route("/chat/stream", post(chat_stream))
         .route("/brainstorm", post(brainstorm))
         .route("/brainstorm/{session_id}/interject", post(interject))
         .route("/ingest", post(ingest))
@@ -534,6 +535,63 @@ async fn chat(
     })
     .await?;
     Ok(Json(resp))
+}
+
+/// One SSE event of a streamed chat answer (`POST /chat/stream`). `type`-tagged
+/// so the client switches on it: `searching` (retrieval started) → `sources`
+/// (citations, once) → `delta` (answer tokens, in order) → `done` (final answer)
+/// — or `error`.
+#[derive(serde::Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum ChatStreamWire {
+    Searching,
+    Sources { sources: Vec<retrieval::ChatSource> },
+    Delta { text: String },
+    Done { answer: String },
+    Error { message: String },
+}
+
+/// Streaming chat-over-corpus (SSE). Same body as `POST /chat`, but the answer
+/// arrives token-by-token: the engine wide-retrieves, emits the cited `sources`,
+/// then streams `delta`s as the model writes. The work runs in a spawned task
+/// pushing events over a channel; this handler just streams the channel (a
+/// missing/invalid provider key surfaces as an `error` event, not a 500).
+async fn chat_stream(
+    State(state): State<Shared>,
+    Json(req): Json<ChatRequest>,
+) -> impl IntoResponse {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<ChatStreamWire>();
+    let st = state.clone();
+    tokio::spawn(async move {
+        let _ = tx.send(ChatStreamWire::Searching);
+        let sink = tx.clone();
+        let result = retrieval::chat_stream(
+            &st.paths,
+            &st.config,
+            &req.query,
+            &req.history,
+            req.persona.as_ref(),
+            |ev| {
+                let wire = match ev {
+                    retrieval::ChatStreamEvent::Sources(s) => ChatStreamWire::Sources { sources: s },
+                    retrieval::ChatStreamEvent::Delta(t) => ChatStreamWire::Delta { text: t },
+                };
+                let _ = sink.send(wire);
+            },
+        )
+        .await;
+        let _ = match result {
+            Ok(resp) => tx.send(ChatStreamWire::Done { answer: resp.answer }),
+            Err(e) => tx.send(ChatStreamWire::Error { message: e.to_string() }),
+        };
+    });
+
+    let stream = UnboundedReceiverStream::new(rx).map(|ev| {
+        Event::default()
+            .json_data(&ev)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+    });
+    Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
 /// Brainstorming roundtable (multi-agent): a panel of specialist agents debates

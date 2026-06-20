@@ -115,6 +115,7 @@ struct MainView: View {
                 case .library: LibraryView(client: client, openRequest: $libraryOpen)
                 case .graph:   GraphView(client: client)
                 case .chat:    ChatView(client: client)
+                case .explore: ExploreView(client: client)
                 case .personas: PersonasView()
                 case .sparks:  SparksView(client: client)
                 case .problems:
@@ -145,7 +146,7 @@ struct MainView: View {
 }
 
 enum AppSection: String, CaseIterable, Identifiable {
-    case search, add, library, graph, chat, personas, sparks, problems, roundtable
+    case search, add, library, graph, chat, explore, personas, sparks, problems, roundtable
     var id: String { rawValue }
     var title: String {
         switch self {
@@ -154,6 +155,7 @@ enum AppSection: String, CaseIterable, Identifiable {
         case .library: "Library"
         case .graph: "Graph"
         case .chat: "Chat"
+        case .explore: "Explore"
         case .personas: "Personas"
         case .sparks: "Sparks"
         case .problems: "Problems"
@@ -167,6 +169,7 @@ enum AppSection: String, CaseIterable, Identifiable {
         case .library: "books.vertical"
         case .graph: "point.3.connected.trianglepath.dotted"
         case .chat: "bubble.left.and.bubble.right"
+        case .explore: "point.3.filled.connected.trianglepath.dotted"
         case .personas: "person.crop.rectangle.stack"
         case .sparks: "sparkles"
         case .problems: "lightbulb.max"
@@ -180,6 +183,7 @@ enum AppSection: String, CaseIterable, Identifiable {
         case .library: "Browse and read your papers"
         case .graph: "Explore connections visually"
         case .chat: "Ask questions over everything"
+        case .explore: "Branch & merge a canvas chat"
         case .personas: "Reusable AI agents"
         case .sparks: "Surprising connections"
         case .problems: "Unsolved gaps worth building"

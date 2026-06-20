@@ -233,6 +233,127 @@ impl AnthropicChat {
         Ok(text)
     }
 
+    /// Streaming variant of [`complete`](Self::complete): sets `stream: true`
+    /// and parses the Messages SSE events, invoking `on_delta` with each text
+    /// fragment (`content_block_delta` / `text_delta`) as it arrives. Returns
+    /// the full concatenated text.
+    ///
+    /// Retry only covers the initial connect (before tokens flow); a mid-stream
+    /// error surfaces as `Network`. Same key-hygiene discipline as
+    /// [`complete`](Self::complete). (Tool-use is not streamed here — that path
+    /// stays on [`complete_with_tools`](Self::complete_with_tools).)
+    pub async fn complete_stream<F: FnMut(&str)>(
+        &self,
+        messages: &[ChatMessage],
+        mut on_delta: F,
+    ) -> Result<String, KbError> {
+        let system: String = messages
+            .iter()
+            .filter(|m| m.role == "system")
+            .map(|m| m.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let turns: Vec<serde_json::Value> = messages
+            .iter()
+            .filter(|m| m.role == "user" || m.role == "assistant")
+            .map(|m| serde_json::json!({ "role": m.role, "content": m.content }))
+            .collect();
+
+        let mut body = serde_json::json!({
+            "model": self.model,
+            "max_tokens": MAX_TOKENS,
+            "messages": turns,
+            "stream": true,
+        });
+        if !system.is_empty() {
+            body["system"] = serde_json::Value::String(system);
+        }
+
+        let url = format!("{}/messages", self.base_url);
+        let max_retries = self.backoff_ms.len();
+        let mut resp = None;
+        for attempt in 0..=max_retries {
+            let r = self
+                .client
+                .post(&url)
+                .header("x-api-key", &self.api_key)
+                .header("anthropic-version", ANTHROPIC_VERSION)
+                .json(&body)
+                .send()
+                .await?;
+            let status = r.status();
+            if status.is_success() {
+                resp = Some(r);
+                break;
+            }
+            if status.as_u16() == 401 || status.as_u16() == 403 {
+                return Err(KbError::Config(format!(
+                    "invalid ANTHROPIC_API_KEY (Messages API returned HTTP {}); \
+                     check the key and re-export it",
+                    status.as_u16()
+                )));
+            }
+            if (status.as_u16() == 429 || status.is_server_error()) && attempt < max_retries {
+                let delay = self.backoff_ms[attempt];
+                tracing::warn!(status = status.as_u16(), attempt = attempt + 1, delay_ms = delay,
+                    "Anthropic stream transient failure, retrying");
+                tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                continue;
+            }
+            return Err(KbError::Network(format!(
+                "Anthropic API returned HTTP {}",
+                status.as_u16()
+            )));
+        }
+        let resp = resp.ok_or_else(|| {
+            KbError::Network(format!("Anthropic stream failed after {max_retries} retries"))
+        })?;
+
+        // Messages SSE: lines like `event: content_block_delta` followed by
+        // `data: {json}`. We key off the `data:` JSON's own `type` field, so the
+        // `event:` lines can be ignored. `content_block_delta` carries
+        // `delta.text`; `message_stop` ends the turn.
+        let mut resp = resp;
+        let mut buf = String::new();
+        let mut text = String::new();
+        while let Some(chunk) = resp.chunk().await.map_err(|e| {
+            KbError::Network(format!("Anthropic stream interrupted: {}", e.without_url()))
+        })? {
+            buf.push_str(&String::from_utf8_lossy(&chunk));
+            while let Some(nl) = buf.find('\n') {
+                let line = buf[..nl].trim().to_string();
+                buf.drain(..=nl);
+                let Some(data) = line.strip_prefix("data:") else { continue };
+                let Ok(v) = serde_json::from_str::<serde_json::Value>(data.trim()) else { continue };
+                match v.get("type").and_then(|t| t.as_str()) {
+                    Some("content_block_delta") => {
+                        if let Some(frag) = v
+                            .get("delta")
+                            .and_then(|d| d.get("text"))
+                            .and_then(|t| t.as_str())
+                        {
+                            if !frag.is_empty() {
+                                text.push_str(frag);
+                                on_delta(frag);
+                            }
+                        }
+                    }
+                    Some("message_stop") => return Ok(text),
+                    Some("error") => {
+                        let msg = v
+                            .get("error")
+                            .and_then(|e| e.get("message"))
+                            .and_then(|m| m.as_str())
+                            .unwrap_or("Anthropic stream error");
+                        return Err(KbError::Network(msg.to_string()));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Ok(text)
+    }
+
     /// Tool-aware completion: the request carries a `tools` array, so the model
     /// may answer with `tool_use` blocks. Returns the full block list **and**
     /// the `stop_reason`, so the caller's loop can decide whether to run tools

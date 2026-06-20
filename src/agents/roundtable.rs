@@ -591,6 +591,23 @@ pub(crate) async fn complete(model: &str, messages: &[ChatMessage]) -> Result<St
     }
 }
 
+/// Streaming sibling of [`complete`]: routes by model id and forwards each token
+/// fragment to `on_delta`, returning the full text. Shared with streaming
+/// persona chat (`retrieval::chat_stream`).
+pub(crate) async fn complete_stream<F: FnMut(&str)>(
+    model: &str,
+    messages: &[ChatMessage],
+    on_delta: F,
+) -> Result<String, KbError> {
+    if model.starts_with("claude") {
+        AnthropicChat::from_env(model)?.complete_stream(messages, on_delta).await
+    } else {
+        OpenAiChat::from_env(model)?
+            .complete_stream(messages, OPENAI_TEMPERATURE, on_delta)
+            .await
+    }
+}
+
 /// Tool-enabled completion for a Claude persona: runs the same prompt through
 /// the agent harness with the read-only corpus tools, so the model can issue
 /// its own `kb_search` / `kb_get_paper` calls mid-turn (on top of the grounding
