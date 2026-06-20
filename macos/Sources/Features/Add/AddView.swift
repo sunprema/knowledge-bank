@@ -7,6 +7,8 @@ import UniformTypeIdentifiers
 @MainActor
 struct AddView: View {
     let client: KBClient
+    /// Open a freshly-added document in the Library (set by the host view).
+    var onOpen: (IngestResult) -> Void = { _ in }
     @Environment(ServerController.self) private var server
 
     @State private var source: AddSource = .arxiv
@@ -129,7 +131,7 @@ struct AddView: View {
             ScrollView {
                 LazyVStack(spacing: 10) {
                     ForEach(Array(added.enumerated()), id: \.offset) { _, doc in
-                        AddedCard(doc: doc)
+                        AddedCard(doc: doc) { onOpen(doc) }
                     }
                 }
                 .padding(16)
@@ -208,22 +210,39 @@ private enum AddSource: String, CaseIterable, Identifiable {
 
 private struct AddedCard: View {
     let doc: IngestResult
+    var onOpen: () -> Void = {}
+    @State private var hovering = false
+
     var body: some View {
-        Card {
-            HStack(alignment: .top, spacing: 12) {
-                Image(systemName: "checkmark.circle.fill")
-                    .font(.title3)
-                    .foregroundStyle(.green)
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(doc.title).font(.headline).lineLimit(2)
-                    HStack(spacing: 8) {
-                        Text(doc.id).font(.caption.monospaced()).foregroundStyle(.secondary)
-                        Chip(text: doc.sourceFormat.uppercased(), color: .accentColor, filled: true)
-                        Text("\(doc.chunks) sections").font(.caption).foregroundStyle(.tertiary)
+        Button(action: onOpen) {
+            Card {
+                HStack(alignment: .top, spacing: 12) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.title3)
+                        .foregroundStyle(.green)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(doc.title).font(.headline).lineLimit(2)
+                        HStack(spacing: 8) {
+                            Text(doc.id).font(.caption.monospaced()).foregroundStyle(.secondary)
+                            Chip(text: doc.sourceFormat.uppercased(), color: .accentColor, filled: true)
+                            Text("\(doc.chunks) sections").font(.caption).foregroundStyle(.tertiary)
+                        }
                     }
+                    Spacer(minLength: 0)
+                    Image(systemName: "chevron.right")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.tertiary)
+                        .opacity(hovering ? 1 : 0.35)
                 }
-                Spacer(minLength: 0)
             }
+            .overlay {
+                RoundedRectangle(cornerRadius: Theme.cardCorner)
+                    .stroke(Color.accentColor.opacity(hovering ? 0.5 : 0), lineWidth: 1)
+            }
+            .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .help("Open “\(doc.title)” in the Library")
     }
 }

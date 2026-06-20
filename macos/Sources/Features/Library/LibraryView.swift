@@ -1,10 +1,20 @@
 import SwiftUI
 
+/// A request to open a specific paper in the Library, handed in from another
+/// section (the Add view opens a just-ingested document this way).
+struct LibraryOpen: Equatable {
+    let id: String
+    let title: String
+}
+
 // Browse the corpus. A filterable list of documents; opening one (from the list
 // or from a paper's Related panel) adds a browser-style tab.
 @MainActor
 struct LibraryView: View {
     let client: KBClient
+    /// A paper another section asked us to open (e.g. a just-added document from
+    /// the Add view). Consumed on appear/change, then cleared.
+    var openRequest: Binding<LibraryOpen?> = .constant(nil)
 
     @State private var papers: [PaperMetadata] = []
     @State private var filter = ""
@@ -31,6 +41,17 @@ struct LibraryView: View {
             content
         }
         .task { await load() }
+        .onAppear { consumeOpenRequest() }
+        .onChange(of: openRequest.wrappedValue) { _, _ in consumeOpenRequest() }
+    }
+
+    /// Open the requested paper as a tab, then clear the request so it doesn't
+    /// re-fire. Works without the home list being loaded — the detail view
+    /// fetches the paper by id.
+    private func consumeOpenRequest() {
+        guard let req = openRequest.wrappedValue else { return }
+        nav.open(req.id, title: req.title)
+        openRequest.wrappedValue = nil
     }
 
     @ViewBuilder private var content: some View {

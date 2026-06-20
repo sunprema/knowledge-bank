@@ -95,6 +95,9 @@ struct MainView: View {
     /// Set by the Problems view to seed a roundtable objective; consumed (and
     /// cleared) by the Roundtable view on appear.
     @State private var roundtableSeed: String?
+    /// Set by the Add view to open a just-ingested document; consumed (and
+    /// cleared) by the Library view.
+    @State private var libraryOpen: LibraryOpen?
 
     var body: some View {
         NavigationSplitView {
@@ -104,8 +107,12 @@ struct MainView: View {
             Group {
                 switch section {
                 case .search:  SearchView(client: client)
-                case .add:     AddView(client: client)
-                case .library: LibraryView(client: client)
+                case .add:
+                    AddView(client: client, onOpen: { result in
+                        libraryOpen = LibraryOpen(id: result.id, title: result.title)
+                        section = .library
+                    })
+                case .library: LibraryView(client: client, openRequest: $libraryOpen)
                 case .graph:   GraphView(client: client)
                 case .chat:    ChatView(client: client)
                 case .personas: PersonasView()
