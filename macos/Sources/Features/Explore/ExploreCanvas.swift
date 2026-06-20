@@ -351,7 +351,6 @@ private struct NodeCardView: View {
 
     @State private var drag: CGSize = .zero
     @State private var showSources = false
-    @State private var showZen = false
     @State private var branchSide: NodeSide?
     @State private var branchName = ""
 
@@ -405,11 +404,13 @@ private struct NodeCardView: View {
             }
             Button("Delete node", role: .destructive) { store.delete([node.id]) }
         }
-        .sheet(isPresented: $showZen) {
-            NodeZenView(node: node,
-                        modelLabel: node.personaId.flatMap(personaModelLabel),
-                        onOpenSource: { s in showZen = false; onOpenSource(s) })
-        }
+    }
+
+    /// Open this node's content in a resizable zen-mode window.
+    private func openZen() {
+        ZenWindow.present(node: node,
+                          modelLabel: node.personaId.flatMap(personaModelLabel),
+                          onOpenSource: onOpenSource)
     }
 
     /// The colored top edge — the signature node-editor accent.
@@ -562,7 +563,7 @@ private struct NodeCardView: View {
 
     private var promptBody: some View {
         VStack(alignment: .leading, spacing: 6) {
-            ioLabel("prompt", "text", onExpand: node.text.isEmpty ? nil : { showZen = true })
+            ioLabel("prompt", "text", onExpand: node.text.isEmpty ? nil : { openZen() })
             contentBox { cappedMarkdown(cap: 130, alignment: .top) }
         }
     }
@@ -570,7 +571,7 @@ private struct NodeCardView: View {
     // MARK: Assistant body
 
     @ViewBuilder private var assistantBody: some View {
-        ioLabel("response", "text", onExpand: node.text.isEmpty ? nil : { showZen = true })
+        ioLabel("response", "text", onExpand: node.text.isEmpty ? nil : { openZen() })
         if node.status == .streaming && node.text.isEmpty {
             contentBox {
                 HStack(spacing: 6) {
@@ -673,9 +674,12 @@ private struct NodeCardView: View {
     /// A small typed-port label like the node editor's `name  type` rows, with
     /// an optional "zen mode" expand button on the trailing edge.
     private func ioLabel(_ name: String, _ type: String, onExpand: (() -> Void)? = nil) -> some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 8) {
             ioLabelBadge(name, type)
             Spacer(minLength: 0)
+            if !node.text.isEmpty {
+                CopyButton(text: node.text, compact: true)
+            }
             if let onExpand {
                 Button(action: onExpand) {
                     Image(systemName: "arrow.up.left.and.arrow.down.right")
@@ -717,15 +721,85 @@ private struct NodeCardView: View {
     }
 }
 
+// MARK: - Copy
+
+/// A copy-to-clipboard button with brief checkmark feedback. Reusable wherever
+/// markdown/text content is shown.
+struct CopyButton: View {
+    let text: String
+    var compact: Bool = false
+    @State private var copied = false
+
+    var body: some View {
+        Button {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(text, forType: .string)
+            withAnimation(.snappy) { copied = true }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                withAnimation(.snappy) { copied = false }
+            }
+        } label: {
+            if compact {
+                Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(copied ? AnyShapeStyle(.green) : AnyShapeStyle(.secondary))
+            } else {
+                Label(copied ? "Copied" : "Copy", systemImage: copied ? "checkmark" : "doc.on.doc")
+                    .foregroundStyle(copied ? .green : .accentColor)
+            }
+        }
+        .buttonStyle(.plain)
+        .help("Copy to clipboard")
+        .disabled(text.isEmpty)
+    }
+}
+
 // MARK: - Zen mode
 
-/// "Zen mode": one node's full content in a roomy, scrollable sheet — formatted
-/// markdown plus its sources — for comfortable reading away from the canvas.
+/// Opens a node's full content in a real, resizable macOS window — so it carries
+/// the usual traffic-light buttons (close / minimize / **zoom-to-maximize**) and
+/// can be resized to read long answers comfortably. Windows are retained until
+/// closed.
+@MainActor
+enum ZenWindow {
+    private static var controllers: [NSWindowController] = []
+
+    static func present(node: ConvNode, modelLabel: String?,
+                        onOpenSource: @escaping (ChatSource) -> Void) {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 760, height: 680),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered, defer: false)
+        window.title = node.role == .user ? "Prompt" : (node.personaName ?? "Assistant")
+        window.titlebarAppearsTransparent = false
+        window.minSize = NSSize(width: 460, height: 340)
+        window.isReleasedWhenClosed = false
+        window.center()
+
+        let controller = NSWindowController(window: window)
+        let root = NodeZenView(node: node, modelLabel: modelLabel,
+                               onOpenSource: onOpenSource,
+                               onClose: { [weak window] in window?.close() })
+        window.contentViewController = NSHostingController(rootView: root)
+
+        controllers.append(controller)
+        NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification,
+                                               object: window, queue: .main) { note in
+            controllers.removeAll { $0.window === (note.object as? NSWindow) }
+        }
+        controller.showWindow(nil)
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+}
+
+/// "Zen mode" content: one node's full markdown plus its sources, shown in a
+/// resizable window (see `ZenWindow`).
 private struct NodeZenView: View {
     let node: ConvNode
     var modelLabel: String?
     var onOpenSource: (ChatSource) -> Void
-    @Environment(\.dismiss) private var dismiss
+    var onClose: () -> Void
 
     private var title: String {
         if node.role == .user { return node.parents.count > 1 ? "Join" : "You" }
@@ -746,7 +820,8 @@ private struct NodeZenView: View {
                     if let modelLabel { Text(modelLabel).font(.caption).foregroundStyle(.secondary) }
                 }
                 Spacer()
-                Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
+                CopyButton(text: node.text)
+                Button("Done") { onClose() }.keyboardShortcut(.defaultAction)
             }
             .padding(.horizontal, 18).padding(.vertical, 12)
             .background(.bar)
@@ -767,11 +842,11 @@ private struct NodeZenView: View {
                     }
                 }
                 .padding(22)
-                .frame(maxWidth: 720, alignment: .leading)
+                .frame(maxWidth: 820, alignment: .leading)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
-        .frame(minWidth: 580, idealWidth: 720, minHeight: 480, idealHeight: 640)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private func zenSourceRow(_ s: ChatSource) -> some View {
