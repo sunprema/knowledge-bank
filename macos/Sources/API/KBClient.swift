@@ -74,6 +74,69 @@ struct KBClient: Sendable {
         return try await post("/chat", json: body)
     }
 
+    /// Streaming chat-over-corpus (`POST /chat/stream`, SSE). Same inputs as
+    /// `chat`, but the answer arrives live: the engine emits `.searching`, then
+    /// `.sources` once retrieval lands, then `.delta` token fragments, ending in
+    /// `.done`. A server-side failure finishes the stream by throwing. Cancelling
+    /// the consuming task tears down the connection. Used by the Explore canvas,
+    /// which runs one stream per attached agent.
+    func chatStream(_ query: String, history: [ChatMessage], persona: Persona? = nil)
+        -> AsyncThrowingStream<ChatStreamEvent, Error>
+    {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    var req = request(path: "/chat/stream", method: "POST")
+                    req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                    req.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+                    req.timeoutInterval = 300
+                    var body: [String: Any] = [
+                        "query": query,
+                        "history": history.map { ["role": $0.role, "content": $0.content] },
+                    ]
+                    if let p = persona {
+                        body["persona"] = [
+                            "prompt": p.prompt, "model": p.modelId,
+                            "tools": p.tools, "queries_kb": p.queriesKB,
+                        ]
+                    }
+                    req.httpBody = try JSONSerialization.data(withJSONObject: body)
+                    let (bytes, resp) = try await URLSession.shared.bytes(for: req)
+                    guard let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+                        throw KBError.server(status: (resp as? HTTPURLResponse)?.statusCode ?? -1,
+                                             message: "chat stream request failed")
+                    }
+                    // One JSON object per `data:` line (same framing as brainstorm).
+                    for try await line in bytes.lines {
+                        guard line.hasPrefix("data:") else { continue }
+                        let json = line.dropFirst(5).drop(while: { $0 == " " })
+                        guard let d = String(json).data(using: .utf8),
+                              let wire = try? Self.decoder.decode(ChatStreamWire.self, from: d)
+                        else { continue }
+                        switch wire.type {
+                        case "searching": continuation.yield(.searching)
+                        case "sources":   continuation.yield(.sources(wire.sources ?? []))
+                        case "delta":     continuation.yield(.delta(wire.text ?? ""))
+                        case "done":
+                            continuation.yield(.done(answer: wire.answer ?? ""))
+                            continuation.finish()
+                            return
+                        case "error":
+                            continuation.finish(throwing: KBError.server(
+                                status: 500, message: wire.message ?? "chat failed"))
+                            return
+                        default: break
+                        }
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
     /// Append a note to a paper (the engine re-embeds it, making it searchable).
     /// Returns the engine's status message.
     @discardableResult

@@ -184,6 +184,102 @@ impl OpenAiChat {
         )))
     }
 
+    /// Streaming variant of [`complete`](Self::complete): sets `stream: true`
+    /// and parses the SSE token deltas, invoking `on_delta` with each text
+    /// fragment as it arrives. Returns the full concatenated answer.
+    ///
+    /// Retry only covers the initial connect (before any token streams); once
+    /// the 2xx body starts flowing a mid-stream error surfaces as `Network`
+    /// (no replay, since partial tokens were already delivered). Same
+    /// key-hygiene discipline as [`complete`](Self::complete).
+    pub async fn complete_stream<F: FnMut(&str)>(
+        &self,
+        messages: &[ChatMessage],
+        temperature: f32,
+        mut on_delta: F,
+    ) -> Result<String, KbError> {
+        let url = format!("{}/chat/completions", self.base_url);
+        let body = serde_json::json!({
+            "model": self.model,
+            "messages": messages,
+            "temperature": temperature,
+            "stream": true,
+        });
+
+        let max_retries = self.backoff_ms.len();
+        let mut resp = None;
+        for attempt in 0..=max_retries {
+            let r = self
+                .client
+                .post(&url)
+                .bearer_auth(&self.api_key)
+                .json(&body)
+                .send()
+                .await?;
+            let status = r.status();
+            if status.is_success() {
+                resp = Some(r);
+                break;
+            }
+            if status.as_u16() == 401 || status.as_u16() == 403 {
+                return Err(KbError::Config(format!(
+                    "invalid OPENAI_API_KEY (chat API returned HTTP {}); \
+                     check the key and re-export it",
+                    status.as_u16()
+                )));
+            }
+            if (status.as_u16() == 429 || status.is_server_error()) && attempt < max_retries {
+                let delay = self.backoff_ms[attempt];
+                tracing::warn!(status = status.as_u16(), attempt = attempt + 1, delay_ms = delay,
+                    "chat stream API transient failure, retrying");
+                tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                continue;
+            }
+            return Err(KbError::Network(format!(
+                "chat stream API returned HTTP {}",
+                status.as_u16()
+            )));
+        }
+        let resp = resp.ok_or_else(|| {
+            KbError::Network(format!("chat stream API failed after {max_retries} retries"))
+        })?;
+
+        // Parse the SSE byte stream: `data: {json}` lines, terminated by
+        // `data: [DONE]`. Each json carries `choices[0].delta.content`.
+        let mut resp = resp;
+        let mut buf = String::new();
+        let mut answer = String::new();
+        while let Some(chunk) = resp.chunk().await.map_err(|e| {
+            KbError::Network(format!("chat stream interrupted: {}", e.without_url()))
+        })? {
+            buf.push_str(&String::from_utf8_lossy(&chunk));
+            while let Some(nl) = buf.find('\n') {
+                let line = buf[..nl].trim().to_string();
+                buf.drain(..=nl);
+                let Some(data) = line.strip_prefix("data:") else { continue };
+                let data = data.trim();
+                if data == "[DONE]" {
+                    return Ok(answer);
+                }
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(data) {
+                    if let Some(delta) = v
+                        .get("choices")
+                        .and_then(|c| c.get(0))
+                        .and_then(|c| c.get("delta"))
+                        .and_then(|d| d.get("content"))
+                        .and_then(|t| t.as_str())
+                    {
+                        if !delta.is_empty() {
+                            answer.push_str(delta);
+                            on_delta(delta);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(answer)
+    }
+
     async fn parse_response(&self, resp: reqwest::Response) -> Result<String, KbError> {
         let parsed: ChatResponse = resp.json().await.map_err(|e| {
             KbError::Network(format!("malformed chat API response: {}", e.without_url()))

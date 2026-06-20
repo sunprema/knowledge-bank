@@ -148,7 +148,7 @@ struct ChatResponse: Codable {
     var sources: [ChatSource] = []
 }
 
-struct ChatSource: Codable, Identifiable {
+struct ChatSource: Codable, Identifiable, Hashable {
     let n: Int
     let paperId: String
     let title: String
@@ -159,6 +159,26 @@ struct ChatSource: Codable, Identifiable {
     var hasPdf: Bool = false
 
     var id: Int { n }
+}
+
+// MARK: - Streaming chat (`POST /chat/stream`)
+
+/// A decoded event from the streaming chat endpoint (see `KBClient.chatStream`).
+enum ChatStreamEvent {
+    case searching                 // retrieval started
+    case sources([ChatSource])     // citations, emitted once
+    case delta(String)             // a fragment of the answer, in order
+    case done(answer: String)      // final full answer
+}
+
+/// Wire shape of one `/chat/stream` SSE event — `type`-tagged, with the field
+/// for that variant present. Decoded then mapped to `ChatStreamEvent`.
+struct ChatStreamWire: Codable {
+    let type: String
+    var sources: [ChatSource]? = nil
+    var text: String? = nil
+    var answer: String? = nil
+    var message: String? = nil
 }
 
 // MARK: - Problems (ResearchAgent)
