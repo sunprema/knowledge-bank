@@ -22,6 +22,18 @@ struct LibraryView: View {
     @State private var error: String?
     @State private var nav = PaperTabs()
 
+    // Shelf state: cover grid vs. compact list, the cover-preview overlay, and
+    // the hover lift. `coverNS` drives the cover→preview morph.
+    @State private var layout: Layout = .grid
+    @State private var preview: PaperMetadata?
+    @State private var hoverID: String?
+    @Namespace private var coverNS
+
+    enum Layout: Hashable { case grid, list }
+
+    private let coverW: CGFloat = 168
+    private let coverH: CGFloat = 224
+
     private var filtered: [PaperMetadata] {
         guard !filter.isEmpty else { return papers }
         let q = filter.lowercased()
@@ -107,11 +119,149 @@ struct LibraryView: View {
                                title: "Your library is empty",
                                message: "Add papers from the terminal with `kb add <arxiv-id>` — they'll show up here.")
             } else {
-                list
+                switch layout {
+                case .grid: grid
+                case .list: list
+                }
             }
         }
         .navigationTitle("Library")
         .searchable(text: $filter, placement: .toolbar, prompt: "Filter by title, author, tag")
+        .toolbar {
+            if !papers.isEmpty {
+                ToolbarItem(placement: .primaryAction) {
+                    Picker("Layout", selection: $layout.animation(.snappy)) {
+                        Image(systemName: "square.grid.2x2").tag(Layout.grid)
+                        Image(systemName: "list.bullet").tag(Layout.list)
+                    }
+                    .pickerStyle(.segmented)
+                    .help("Switch between shelf and list")
+                }
+            }
+        }
+        .overlay { if let p = preview { previewOverlay(p) } }
+    }
+
+    // The shelf: a grid of book-style covers. Tapping a cover morphs it into a
+    // preview card (abstract + Read) rather than jumping straight into the tab.
+    private var grid: some View {
+        ScrollView {
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: coverW, maximum: coverW), spacing: 30)],
+                      alignment: .leading, spacing: 30) {
+                ForEach(filtered) { paper in coverCard(paper) }
+            }
+            .padding(28)
+        }
+    }
+
+    private func coverCard(_ paper: PaperMetadata) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ZStack {
+                // While this card is expanded in the overlay, hold its slot with
+                // a placeholder so the grid doesn't reflow under the preview.
+                if preview?.id == paper.id {
+                    Color.clear
+                } else {
+                    CoverImage(paper: paper, client: client)
+                        .frame(width: coverW, height: coverH)
+                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                        .overlay(RoundedRectangle(cornerRadius: 10).stroke(.black.opacity(0.12), lineWidth: 0.5))
+                        .shadow(color: .black.opacity(0.28), radius: hoverID == paper.id ? 14 : 8,
+                                x: 0, y: hoverID == paper.id ? 9 : 5)
+                        .matchedGeometryEffect(id: paper.id, in: coverNS)
+                        .scaleEffect(hoverID == paper.id ? 1.04 : 1, anchor: .bottom)
+                        .onHover { inside in hoverID = inside ? paper.id : (hoverID == paper.id ? nil : hoverID) }
+                        .onTapGesture {
+                            withAnimation(.spring(response: 0.42, dampingFraction: 0.82)) { preview = paper }
+                        }
+                }
+            }
+            .frame(width: coverW, height: coverH)
+            .animation(.snappy(duration: 0.22), value: hoverID)
+
+            Text(paper.title)
+                .font(.subheadline.weight(.medium))
+                .lineLimit(2)
+                .frame(width: coverW, alignment: .leading)
+            if let first = paper.authors.first {
+                Text(first + (paper.authors.count > 1 ? " et al." : ""))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .frame(width: coverW, alignment: .leading)
+            }
+        }
+        .contentShape(Rectangle())
+    }
+
+    // The expanded "book detail": the cover morphs out of the grid (matched
+    // geometry) while the summary and Read action fade in beside it.
+    private func previewOverlay(_ paper: PaperMetadata) -> some View {
+        let dismiss = { withAnimation(.spring(response: 0.42, dampingFraction: 0.85)) { preview = nil } }
+        return ZStack {
+            Rectangle().fill(.black.opacity(0.4)).ignoresSafeArea()
+                .transition(.opacity)
+                .onTapGesture(perform: dismiss)
+
+            HStack(alignment: .top, spacing: 28) {
+                CoverImage(paper: paper, client: client)
+                    .frame(width: 260, height: 347)
+                    .clipShape(RoundedRectangle(cornerRadius: 14))
+                    .overlay(RoundedRectangle(cornerRadius: 14).stroke(.black.opacity(0.15), lineWidth: 0.5))
+                    .shadow(color: .black.opacity(0.4), radius: 24, y: 12)
+                    .matchedGeometryEffect(id: paper.id, in: coverNS)
+
+                VStack(alignment: .leading, spacing: 14) {
+                    Text(paper.title)
+                        .font(.system(.title, design: .serif).weight(.bold))
+                        .lineLimit(4)
+                    if !paper.authors.isEmpty {
+                        Text(paper.authors.prefix(6).joined(separator: ", ")
+                             + (paper.authors.count > 6 ? " et al." : ""))
+                            .font(.title3).foregroundStyle(.secondary).lineLimit(2)
+                    }
+                    HStack(spacing: 6) {
+                        Chip(text: paper.kind.capitalized, color: .accentColor, filled: true)
+                        if !paper.publishedAt.isEmpty { Chip(text: Theme.year(paper.publishedAt)) }
+                        ForEach(paper.categories.prefix(3), id: \.self) { Chip(text: $0) }
+                        ForEach(paper.tags.prefix(3), id: \.self) { Chip(text: $0, color: .accentColor, filled: true) }
+                    }
+                    if !paper.abstract.isEmpty {
+                        ScrollView {
+                            Text(paper.abstract)
+                                .font(.system(.body, design: .serif))
+                                .lineSpacing(4)
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .frame(maxHeight: 200)
+                    }
+                    Spacer(minLength: 0)
+                    HStack(spacing: 12) {
+                        Button {
+                            let id = paper.arxivId, title = paper.title
+                            withAnimation(.spring(response: 0.4, dampingFraction: 0.85)) { preview = nil }
+                            nav.open(id, title: title)
+                        } label: {
+                            Label("Read", systemImage: "book").frame(maxWidth: 150)
+                        }
+                        .buttonStyle(.borderedProminent).controlSize(.large)
+                        .keyboardShortcut(.defaultAction)
+
+                        Button("Close", action: dismiss)
+                            .controlSize(.large).keyboardShortcut(.cancelAction)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .transition(.opacity.combined(with: .move(edge: .trailing)))
+            }
+            .padding(32)
+            .frame(maxWidth: 820, maxHeight: 540)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 24))
+            .overlay(RoundedRectangle(cornerRadius: 24).stroke(.separator, lineWidth: 0.5))
+            .shadow(color: .black.opacity(0.3), radius: 40, y: 20)
+            .padding(40)
+        }
     }
 
     private var list: some View {
@@ -207,6 +357,12 @@ private struct PaperRow: View {
                         if !paper.publishedAt.isEmpty { Chip(text: Theme.year(paper.publishedAt)) }
                         ForEach(paper.categories.prefix(3), id: \.self) { Chip(text: $0) }
                         ForEach(paper.tags.prefix(3), id: \.self) { Chip(text: $0, color: .accentColor, filled: true) }
+                    }
+                    // Web pages: show the source host so the origin is visible at
+                    // a glance (the full clickable link lives in the detail view).
+                    if let source = paper.sourceUrl, let host = URL(string: source)?.host {
+                        Label(host, systemImage: "globe")
+                            .font(.caption).foregroundStyle(.secondary).lineLimit(1)
                     }
                 }
                 Spacer(minLength: 0)

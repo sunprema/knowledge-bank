@@ -170,6 +170,16 @@ fn tool_definitions() -> Value {
             }
         },
         {
+            "name": "kb_brief",
+            "description": "Get the user's daily KB brief: new arXiv papers surfaced by their standing watches — each scored by how strongly it connects to their existing corpus, with the connecting papers/reflections named so you can see WHY it's relevant — plus one resurfaced past reflection, a few fresh cross-document sparks, and corpus stats. Use at the start of a session to catch the user up, or when they ask 'what's new', 'anything relevant lately', or to triage their reading queue. To ingest one of the surfaced papers, call the HTTP /ingest path or tell the user to add it; this tool is read-only.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "limit": { "type": "integer", "default": 12, "minimum": 1, "maximum": 50, "description": "Max new candidate papers to include." }
+                }
+            }
+        },
+        {
             "name": "kb_get_paper",
             "description": "Get full metadata, abstract, and user notes for a specific paper. Use after kb_search when Claude needs more context than a chunk snippet provides.",
             "inputSchema": {
@@ -224,6 +234,7 @@ async fn call_tool(
 ) -> Result<String, KbError> {
     match name {
         "kb_search" => tool_search(paths, config, args).await,
+        "kb_brief" => tool_brief(paths, args),
         "kb_find_problems" => tool_find_problems(paths, config, args).await,
         "kb_get_paper" => tool_get_paper(paths, args),
         "kb_add_note" => tool_add_note(paths, config, args).await,
@@ -307,6 +318,20 @@ pub(crate) async fn tool_search(paths: &KbPaths, config: &Config, args: &Value) 
     let response = retrieval::search(paths, config, &query, mode, k, filters).await?;
     serde_json::to_string_pretty(&response)
         .map_err(|e| KbError::Index(format!("serialize results: {e}")))
+}
+
+/// Run the `kb_brief` tool — the daily digest of new papers, a resurfaced
+/// reflection, and sparks. Read-only over `meta.db` (advances the resurfacing
+/// rotation cursor only).
+fn tool_brief(paths: &KbPaths, args: &Value) -> Result<String, KbError> {
+    let limit = args
+        .get("limit")
+        .and_then(|k| k.as_u64())
+        .map(|k| (k as usize).clamp(1, 50))
+        .unwrap_or(crate::watch::DEFAULT_BRIEF_PAPERS);
+    let brief = crate::watch::brief(paths, limit)?;
+    serde_json::to_string_pretty(&brief)
+        .map_err(|e| KbError::Index(format!("serialize brief: {e}")))
 }
 
 async fn tool_find_problems(

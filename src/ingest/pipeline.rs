@@ -25,6 +25,8 @@ pub struct IngestReport {
     pub chunks: usize,
     pub cache_hits: usize,
     pub source_format: SourceFormat,
+    /// The page a web doc was ingested from (`kb add --url`); `None` otherwise.
+    pub source_url: Option<String>,
     pub elapsed_secs: f64,
 }
 
@@ -246,6 +248,7 @@ pub async fn ingest_url(
         chunks: n_chunks,
         cache_hits,
         source_format: SourceFormat::Html,
+        source_url: meta.source_url.clone(),
         elapsed_secs: elapsed,
     })
 }
@@ -428,6 +431,7 @@ pub async fn ingest_idea(
         chunks: n_chunks,
         cache_hits,
         source_format: SourceFormat::Markdown,
+        source_url: meta.source_url.clone(),
         elapsed_secs: elapsed,
     })
 }
@@ -531,6 +535,7 @@ pub async fn ingest_reflection(
         chunks: n_chunks,
         cache_hits,
         source_format: SourceFormat::Markdown,
+        source_url: meta.source_url.clone(),
         elapsed_secs: elapsed,
     })
 }
@@ -624,6 +629,7 @@ async fn index_and_report(
         chunks: n_chunks,
         cache_hits,
         source_format: meta.source_format,
+        source_url: meta.source_url.clone(),
         elapsed_secs: elapsed,
     })
 }

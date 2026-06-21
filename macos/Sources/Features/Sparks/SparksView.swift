@@ -4,6 +4,8 @@ import SwiftUI
 // surprising first. Each spark links two chunks from (usually) different papers.
 struct SparksView: View {
     let client: KBClient
+    /// Open a paper from a spark end in the Library (a new browser-style tab).
+    var onOpenPaper: (String, String) -> Void = { _, _ in }
 
     @State private var sparks: [Spark] = []
     @State private var loading = true
@@ -23,7 +25,7 @@ struct SparksView: View {
             } else {
                 ScrollView {
                     LazyVStack(spacing: 12) {
-                        ForEach(sparks) { SparkCard(spark: $0) }
+                        ForEach(sparks) { SparkCard(spark: $0, onOpenPaper: onOpenPaper) }
                     }
                     .padding(16)
                 }
@@ -56,6 +58,7 @@ struct SparksView: View {
 
 private struct SparkCard: View {
     let spark: Spark
+    var onOpenPaper: (String, String) -> Void = { _, _ in }
     var body: some View {
         Card {
             VStack(alignment: .leading, spacing: 12) {
@@ -79,16 +82,24 @@ private struct SparkCard: View {
     }
 
     private func end(_ e: SparkEnd) -> some View {
-        HStack(alignment: .top, spacing: 10) {
-            Chip(text: Theme.sectionLabel(e.sectionType),
-                 color: Theme.sectionColor(e.sectionType), filled: true)
-                .frame(width: 92, alignment: .leading)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(e.title).font(.subheadline.weight(.medium)).lineLimit(1)
-                if !e.snippet.isEmpty {
-                    Text(e.snippet).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+        Button { onOpenPaper(e.paperId, e.title) } label: {
+            HStack(alignment: .top, spacing: 10) {
+                Chip(text: Theme.sectionLabel(e.sectionType),
+                     color: Theme.sectionColor(e.sectionType), filled: true)
+                    .frame(width: 92, alignment: .leading)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(e.title).font(.subheadline.weight(.medium)).lineLimit(1)
+                    if !e.snippet.isEmpty {
+                        Text(e.snippet).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                    }
                 }
+                Spacer(minLength: 0)
+                Image(systemName: "arrow.up.forward.square")
+                    .font(.caption).foregroundStyle(.tertiary)
             }
+            .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
+        .help("Open “\(e.title)” in the Library")
     }
 }

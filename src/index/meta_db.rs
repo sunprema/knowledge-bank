@@ -56,6 +56,50 @@ pub struct CortexEdgeRow {
     pub dst_snippet: String,
 }
 
+/// A standing ArXiv Watch interest (see crate::watch).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Watch {
+    pub id: i64,
+    pub kind: String,
+    pub value: String,
+    pub enabled: bool,
+    pub created_at: String,
+    pub last_refreshed_at: Option<String>,
+}
+
+/// Insert/refresh payload for a scored watch candidate. `why_json` is an
+/// already-serialized JSON description of the corpus connections.
+#[derive(Debug, Clone)]
+pub struct NewCandidate {
+    pub arxiv_id: String,
+    pub watch_id: i64,
+    pub title: String,
+    pub abstract_text: String,
+    pub authors_json: String,
+    pub categories_json: String,
+    pub published_at: String,
+    pub score: f32,
+    pub why_json: String,
+}
+
+/// A scored candidate paper surfaced by a watch, as stored/returned.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Candidate {
+    pub arxiv_id: String,
+    pub watch_id: i64,
+    pub title: String,
+    #[serde(rename = "abstract")]
+    pub abstract_text: String,
+    pub authors: Vec<String>,
+    pub categories: Vec<String>,
+    pub published_at: String,
+    pub score: f32,
+    /// Parsed `why` payload (the corpus connections behind the score).
+    pub why: serde_json::Value,
+    pub status: String,
+    pub first_seen_at: String,
+}
+
 /// Corpus stats for `kb stats` (includes the Other-ratio health signal —
 /// resolved decision: revisit classifier if it exceeds ~25%).
 #[derive(Debug, Default, serde::Serialize)]
@@ -154,6 +198,43 @@ CREATE TABLE IF NOT EXISTS embedding_cache (
 );
 
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+
+-- ArXiv Watch: standing interests (the corpus grows itself). User-authored
+-- state that can't be rebuilt from the canonical files, so it lives in the
+-- persistent schema and survives `kb reindex`. `kind` is 'category' (an arXiv
+-- category like cs.LG), 'author', or 'query' (free-text). `value` is the raw
+-- term; it is composed into an arXiv `search_query` at refresh time.
+CREATE TABLE IF NOT EXISTS watches (
+  id                INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind              TEXT NOT NULL,
+  value             TEXT NOT NULL,
+  enabled           INTEGER NOT NULL DEFAULT 1,
+  created_at        TEXT NOT NULL,
+  last_refreshed_at TEXT,
+  UNIQUE (kind, value)
+);
+
+-- Candidate papers surfaced by a watch, scored by how strongly they connect to
+-- the existing corpus (see crate::watch). One row per arXiv id regardless of
+-- how many watches matched it. `status` carries user state ('new' until the
+-- user ingests or dismisses it), so this table is persistent too — re-fetching
+-- must never resurrect a dismissed paper. `why` is JSON: the corpus
+-- connections that justify the score.
+CREATE TABLE IF NOT EXISTS watch_candidates (
+  arxiv_id      TEXT PRIMARY KEY,
+  watch_id      INTEGER NOT NULL,
+  title         TEXT NOT NULL,
+  abstract      TEXT NOT NULL,
+  authors       TEXT NOT NULL,
+  categories    TEXT NOT NULL,
+  published_at  TEXT NOT NULL,
+  score         REAL NOT NULL,
+  why           TEXT NOT NULL,
+  status        TEXT NOT NULL DEFAULT 'new',
+  first_seen_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_watch_cand_status ON watch_candidates(status);
+CREATE INDEX IF NOT EXISTS idx_watch_cand_score ON watch_candidates(score);
 ";
 
 const CHUNK_COLUMNS: &str = "id, chunk_id, paper_id, section_type, ordinal, content_hash, \
@@ -588,6 +669,18 @@ impl MetaDb {
         Ok(())
     }
 
+    /// Paper ids whose document kind matches (e.g. all reflections or notes).
+    /// Used by the daily brief to rotate through past synthesis.
+    pub fn paper_ids_by_kind(&self, kind: DocKind) -> Result<Vec<String>, KbError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT paper_id FROM documents WHERE kind = ?1 ORDER BY paper_id")?;
+        let rows = stmt
+            .query_map([kind.as_str()], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
     // ---- embedding cache (addendum §9) ----
 
     pub fn cache_get(
@@ -801,6 +894,175 @@ impl MetaDb {
             [key, value],
         )?;
         Ok(())
+    }
+
+    // ---- ArXiv Watch (the corpus grows itself; see crate::watch) ----
+
+    /// Add a watch (idempotent on `(kind, value)`). Returns the row id of the
+    /// new or existing watch.
+    pub fn add_watch(&self, kind: &str, value: &str) -> Result<i64, KbError> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO watches (kind, value, enabled, created_at) \
+             VALUES (?1, ?2, 1, ?3)",
+            rusqlite::params![kind, value, crate::now_rfc3339()],
+        )?;
+        let id: i64 = self.conn.query_row(
+            "SELECT id FROM watches WHERE kind = ?1 AND value = ?2",
+            rusqlite::params![kind, value],
+            |r| r.get(0),
+        )?;
+        Ok(id)
+    }
+
+    pub fn list_watches(&self) -> Result<Vec<Watch>, KbError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, kind, value, enabled, created_at, last_refreshed_at \
+             FROM watches ORDER BY id",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(Watch {
+                    id: r.get(0)?,
+                    kind: r.get(1)?,
+                    value: r.get(2)?,
+                    enabled: r.get::<_, i64>(3)? != 0,
+                    created_at: r.get(4)?,
+                    last_refreshed_at: r.get(5)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Remove a watch. Its candidates are left in place (a paper can stay
+    /// interesting after the watch that found it is gone).
+    pub fn remove_watch(&self, id: i64) -> Result<bool, KbError> {
+        let n = self
+            .conn
+            .execute("DELETE FROM watches WHERE id = ?1", [id])?;
+        Ok(n > 0)
+    }
+
+    pub fn set_watch_enabled(&self, id: i64, enabled: bool) -> Result<(), KbError> {
+        self.conn.execute(
+            "UPDATE watches SET enabled = ?2 WHERE id = ?1",
+            rusqlite::params![id, enabled as i64],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_watch_refreshed(&self, id: i64, at: &str) -> Result<(), KbError> {
+        self.conn.execute(
+            "UPDATE watches SET last_refreshed_at = ?2 WHERE id = ?1",
+            rusqlite::params![id, at],
+        )?;
+        Ok(())
+    }
+
+    /// Insert a freshly-scored candidate, or refresh its score/why if it is
+    /// still `new`. A candidate the user already ingested or dismissed is left
+    /// untouched (the `WHERE status = 'new'` guard), so re-running a watch
+    /// never resurrects it. Returns true if a row was inserted (i.e. the
+    /// candidate is newly surfaced).
+    pub fn upsert_candidate(&self, c: &NewCandidate) -> Result<bool, KbError> {
+        let existed: bool = self
+            .conn
+            .query_row(
+                "SELECT 1 FROM watch_candidates WHERE arxiv_id = ?1",
+                [&c.arxiv_id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        self.conn.execute(
+            "INSERT INTO watch_candidates \
+               (arxiv_id, watch_id, title, abstract, authors, categories, \
+                published_at, score, why, status, first_seen_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'new', ?10) \
+             ON CONFLICT(arxiv_id) DO UPDATE SET \
+               watch_id = excluded.watch_id, title = excluded.title, \
+               abstract = excluded.abstract, authors = excluded.authors, \
+               categories = excluded.categories, published_at = excluded.published_at, \
+               score = excluded.score, why = excluded.why \
+             WHERE watch_candidates.status = 'new'",
+            rusqlite::params![
+                c.arxiv_id,
+                c.watch_id,
+                c.title,
+                c.abstract_text,
+                c.authors_json,
+                c.categories_json,
+                c.published_at,
+                c.score,
+                c.why_json,
+                crate::now_rfc3339(),
+            ],
+        )?;
+        Ok(!existed)
+    }
+
+    /// Candidates with the given status (or all if `None`), best score first.
+    pub fn list_candidates(
+        &self,
+        status: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<Candidate>, KbError> {
+        let mut sql = String::from(
+            "SELECT arxiv_id, watch_id, title, abstract, authors, categories, \
+                    published_at, score, why, status, first_seen_at \
+             FROM watch_candidates",
+        );
+        if status.is_some() {
+            sql.push_str(" WHERE status = ?1");
+        }
+        sql.push_str(" ORDER BY score DESC, published_at DESC LIMIT ");
+        sql.push_str(&limit.to_string());
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let map = |row: &rusqlite::Row<'_>| -> rusqlite::Result<Candidate> {
+            let authors: String = row.get(4)?;
+            let categories: String = row.get(5)?;
+            let why: String = row.get(8)?;
+            Ok(Candidate {
+                arxiv_id: row.get(0)?,
+                watch_id: row.get(1)?,
+                title: row.get(2)?,
+                abstract_text: row.get(3)?,
+                authors: serde_json::from_str(&authors).unwrap_or_default(),
+                categories: serde_json::from_str(&categories).unwrap_or_default(),
+                published_at: row.get(6)?,
+                score: row.get(7)?,
+                why: serde_json::from_str(&why).unwrap_or(serde_json::Value::Null),
+                status: row.get(9)?,
+                first_seen_at: row.get(10)?,
+            })
+        };
+        let rows = match status {
+            Some(s) => stmt.query_map([s], map)?.collect::<rusqlite::Result<Vec<_>>>(),
+            None => stmt.query_map([], map)?.collect::<rusqlite::Result<Vec<_>>>(),
+        }?;
+        Ok(rows)
+    }
+
+    /// Set a candidate's status ('ingested' | 'dismissed' | 'new'). Returns
+    /// false if no such candidate exists.
+    pub fn set_candidate_status(&self, arxiv_id: &str, status: &str) -> Result<bool, KbError> {
+        let n = self.conn.execute(
+            "UPDATE watch_candidates SET status = ?2 WHERE arxiv_id = ?1",
+            rusqlite::params![arxiv_id, status],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Count of candidates in each status, for the brief/stats.
+    pub fn candidate_status_counts(&self) -> Result<Vec<(String, usize)>, KbError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT status, COUNT(*) FROM watch_candidates GROUP BY status ORDER BY status",
+        )?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as usize)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
     }
 
     // ---- stats ----

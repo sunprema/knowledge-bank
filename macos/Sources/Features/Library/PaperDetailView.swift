@@ -13,7 +13,12 @@ struct PaperDetailView: View {
     /// When set (split panes), show a close-split button in the inline header.
     var onClosePane: (() -> Void)? = nil
 
+    @Environment(ServerController.self) private var server
+
     @State private var detail: PaperDetail?
+    /// The document's body (`sections.md`), read from disk. Shown for non-PDF
+    /// docs (web pages, ideas, reflections) whose content has no PDF to render.
+    @State private var bodyMarkdown: String?
     @State private var related: [SimilarPaper] = []
     @State private var links: [LinkConn] = []
     @State private var sparksFor: [Spark] = []
@@ -84,7 +89,8 @@ struct PaperDetailView: View {
     @ViewBuilder private var mainContent: some View {
         if let detail {
             if readerMode {
-                ReaderView(paperId: paperId, title: detail.metadata.title)
+                ReaderView(client: client, paperId: paperId, title: detail.metadata.title,
+                           hasPDF: detail.pdfPath != nil)
             } else if showPDF && detail.pdfPath != nil {
                 // Adjustable-width split: paper on the left, PDF on the right.
                 HSplitView {
@@ -154,7 +160,13 @@ struct PaperDetailView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
                 headerBlock(detail.metadata)
-                abstractBlock(detail.metadata)
+                // PDF docs show their content in the PDF panel; non-PDF docs
+                // (web pages, ideas, reflections) render their markdown body here.
+                if detail.pdfPath == nil, let body = bodyMarkdown, !body.isEmpty {
+                    contentBlock(body)
+                } else {
+                    abstractBlock(detail.metadata)
+                }
                 notesCard(detail.notes)
                 if !related.isEmpty || !links.isEmpty || !sparksFor.isEmpty { connectionsBlock }
             }
@@ -178,6 +190,18 @@ struct PaperDetailView: View {
                 ForEach(m.categories.prefix(5), id: \.self) { Chip(text: $0) }
                 ForEach(m.tags, id: \.self) { Chip(text: $0, color: .accentColor, filled: true) }
             }
+            // Web pages carry the URL they were ingested from — show it as a
+            // clickable link back to the original source.
+            if let source = m.sourceUrl, let url = URL(string: source) {
+                Link(destination: url) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "globe")
+                        Text(source).lineLimit(1).truncationMode(.middle)
+                    }
+                    .font(.callout)
+                }
+                .help("Open the original page — \(source)")
+            }
         }
     }
 
@@ -187,6 +211,16 @@ struct PaperDetailView: View {
             Text(m.abstract.isEmpty ? "No abstract." : m.abstract)
                 .font(.system(.body, design: .serif))
                 .lineSpacing(4)
+                .textSelection(.enabled)
+        }
+    }
+
+    /// The full markdown body for docs with no PDF (web pages, ideas,
+    /// reflections). Rendered with the native markdown renderer.
+    private func contentBlock(_ markdown: String) -> some View {
+        SectionBox(title: "Content", systemImage: "doc.plaintext") {
+            MarkdownText(markdown: markdown)
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .textSelection(.enabled)
         }
     }
@@ -316,6 +350,10 @@ struct PaperDetailView: View {
         async let g = try? await client.graph(neighbors: 0)   // explicit links only
         async let s = try? await client.sparks(limit: 200)
         detail = await d
+        // The body lives in `<kbRoot>/<id>/sections.md` (same disk-read pattern
+        // as ReaderView's reader.md). Shown when there's no PDF to render.
+        let sections = server.kbRoot.appendingPathComponent(paperId).appendingPathComponent("sections.md")
+        bodyMarkdown = try? String(contentsOf: sections, encoding: .utf8)
         related = (await r)?.papers ?? []
         links = linkNeighbors(await g)
         sparksFor = (await s)?.sparks.filter { $0.src.paperId == paperId || $0.dst.paperId == paperId } ?? []

@@ -164,6 +164,87 @@ pub fn open_stores_for_query(
     Ok((db, index))
 }
 
+/// One corpus paper that a piece of external text connects to, scored by raw
+/// cosine similarity (the well-calibrated 0.45–0.65 "related" scale), not the
+/// blended/RRF search score. Used by ArXiv Watch to rank outside papers by how
+/// strongly they connect to the existing corpus.
+#[derive(Debug, Clone, Serialize)]
+pub struct CorpusConnection {
+    pub paper_id: String,
+    pub title: String,
+    pub kind: String,
+    pub section_types: Vec<String>,
+    /// Best cosine similarity between the query text and this paper's chunks.
+    pub score: f32,
+}
+
+/// Score how strongly `query` text connects to the existing corpus: embed it,
+/// run a pure-cosine nearest-neighbor search, and group the hits by paper
+/// (best cosine per paper), newest connection first. Returns at most one entry
+/// per paper, ordered by descending cosine. Empty corpus ⇒ empty result (no
+/// error), so a fresh KB simply scores everything 0.
+///
+/// Unlike [`search`], this deliberately bypasses recency/importance blending
+/// and RRF fusion — the watch wants the raw semantic proximity, on a scale that
+/// means the same thing for every candidate.
+pub async fn connection_strength(
+    paths: &KbPaths,
+    config: &Config,
+    query: &str,
+    k: usize,
+) -> Result<Vec<CorpusConnection>, KbError> {
+    let (db, index) = open_stores_for_query(paths, config)?;
+    if index.is_empty() {
+        return Ok(Vec::new());
+    }
+    let query_vec = embed_query(config, query).await?;
+    // Over-fetch chunks so we can collapse to distinct papers and still return k.
+    let ranked = index.search(&query_vec, k.saturating_mul(4).max(k), None)?;
+
+    let ids: Vec<i64> = ranked.iter().map(|(id, _)| *id as i64).collect();
+    let cosine: HashMap<i64, f32> = ranked.iter().map(|(id, s)| (*id as i64, *s)).collect();
+
+    // Hydrate, then walk in cosine order (descending) so the first time we see a
+    // paper is its best-matching chunk.
+    let mut recs: HashMap<i64, ChunkRecord> =
+        db.chunks_by_vector_ids(&ids)?.into_iter().map(|r| (r.vector_id, r)).collect();
+
+    let mut order: Vec<(i64, f32)> = cosine.iter().map(|(id, s)| (*id, *s)).collect();
+    order.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+
+    let mut out: Vec<CorpusConnection> = Vec::new();
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    for (id, score) in order {
+        let Some(rec) = recs.remove(&id) else { continue };
+        let section = rec.section_type.as_str().to_string();
+        match seen.get(&rec.paper_id) {
+            Some(&i) => {
+                // Same paper, weaker chunk: just record another matched section.
+                let conn: &mut CorpusConnection = &mut out[i];
+                if conn.section_types.len() < 3 && !conn.section_types.contains(&section) {
+                    conn.section_types.push(section);
+                }
+            }
+            None => {
+                let meta = PaperMetadata::load(&paths.metadata_path(&rec.paper_id))
+                    .unwrap_or_else(|_| placeholder_meta(&rec.paper_id));
+                seen.insert(rec.paper_id.clone(), out.len());
+                out.push(CorpusConnection {
+                    paper_id: rec.paper_id.clone(),
+                    title: meta.title,
+                    kind: meta.kind.as_str().to_string(),
+                    section_types: vec![section],
+                    score,
+                });
+                if out.len() >= k {
+                    break;
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// End-to-end search (PRD §5 data flow).
 pub async fn search(
     paths: &KbPaths,

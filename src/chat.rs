@@ -50,6 +50,9 @@ pub struct OpenAiChat {
     base_url: String,
     /// Shrunk in tests so retry paths don't sleep for real.
     backoff_ms: [u64; 3],
+    /// Optional `max_tokens` cap. `None` ⇒ the field is omitted (model default).
+    /// Raised by longer-form paths like the Clean Read rewrite.
+    max_tokens: Option<u32>,
 }
 
 impl std::fmt::Debug for OpenAiChat {
@@ -101,7 +104,17 @@ impl OpenAiChat {
             model: model.to_string(),
             base_url: base_url.trim_end_matches('/').to_string(),
             backoff_ms: DEFAULT_BACKOFF_MS,
+            max_tokens: None,
         }
+    }
+
+    /// Set the output token cap (`max_tokens`) for this client. Used by
+    /// longer-form paths like the Clean Read rewrite; otherwise the field is
+    /// omitted and the model's default applies.
+    #[must_use]
+    pub fn with_max_tokens(mut self, n: u32) -> Self {
+        self.max_tokens = Some(n);
+        self
     }
 
     /// Test-only constructor with a custom backoff so retry tests don't sleep.
@@ -128,11 +141,14 @@ impl OpenAiChat {
         temperature: f32,
     ) -> Result<String, KbError> {
         let url = format!("{}/chat/completions", self.base_url);
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "model": self.model,
             "messages": messages,
             "temperature": temperature,
         });
+        if let Some(mt) = self.max_tokens {
+            body["max_tokens"] = mt.into();
+        }
 
         let max_retries = self.backoff_ms.len();
         let mut last_status = None;
@@ -199,12 +215,15 @@ impl OpenAiChat {
         mut on_delta: F,
     ) -> Result<String, KbError> {
         let url = format!("{}/chat/completions", self.base_url);
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "model": self.model,
             "messages": messages,
             "temperature": temperature,
             "stream": true,
         });
+        if let Some(mt) = self.max_tokens {
+            body["max_tokens"] = mt.into();
+        }
 
         let max_retries = self.backoff_ms.len();
         let mut resp = None;

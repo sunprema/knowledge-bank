@@ -137,6 +137,73 @@ struct KBClient: Sendable {
         }
     }
 
+    /// Fetch the cached Clean Read (`reader.md`) for a paper, or `nil` if it
+    /// hasn't been generated yet (the engine 404s in that case).
+    func reader(_ id: String) async throws -> String? {
+        struct Reader: Decodable { let reader: String }
+        do {
+            let r: Reader = try await get("/papers/\(encode(id))/reader")
+            return r.reader
+        } catch KBError.server(let status, _) where status == 404 {
+            return nil
+        }
+    }
+
+    /// Generate (and cache) the Clean Read for a paper, streamed live
+    /// (`POST /papers/{id}/reader`, SSE). The engine emits `.generating`, then
+    /// `.delta` token fragments as it rewrites the body section by section,
+    /// ending in `.done` (by which point `reader.md` is on disk). `model` selects
+    /// the LLM (Claude vs OpenAI by id prefix); omit to use the engine default.
+    /// A server-side failure finishes the stream by throwing. Cancelling the
+    /// consuming task tears down the connection.
+    func readerStream(_ id: String, model: String? = nil)
+        -> AsyncThrowingStream<ReaderStreamEvent, Error>
+    {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    var req = request(path: "/papers/\(encode(id))/reader", method: "POST")
+                    req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                    req.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+                    req.timeoutInterval = 600   // a full-paper rewrite can be slow
+                    var body: [String: Any] = [:]
+                    if let model, !model.isEmpty { body["model"] = model }
+                    req.httpBody = try JSONSerialization.data(withJSONObject: body)
+                    let (bytes, resp) = try await URLSession.shared.bytes(for: req)
+                    guard let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+                        throw KBError.server(status: (resp as? HTTPURLResponse)?.statusCode ?? -1,
+                                             message: "clean read request failed")
+                    }
+                    // One JSON object per `data:` line (same framing as chat stream).
+                    for try await line in bytes.lines {
+                        guard line.hasPrefix("data:") else { continue }
+                        let json = line.dropFirst(5).drop(while: { $0 == " " })
+                        guard let d = String(json).data(using: .utf8),
+                              let wire = try? Self.decoder.decode(ReaderStreamWire.self, from: d)
+                        else { continue }
+                        switch wire.type {
+                        case "generating": continuation.yield(.generating)
+                        case "delta":      continuation.yield(.delta(wire.text ?? ""))
+                        case "done":
+                            continuation.yield(.done(reader: wire.reader ?? ""))
+                            continuation.finish()
+                            return
+                        case "error":
+                            continuation.finish(throwing: KBError.server(
+                                status: 500, message: wire.message ?? "clean read failed"))
+                            return
+                        default: break
+                        }
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
     /// Append a note to a paper (the engine re-embeds it, making it searchable).
     /// Returns the engine's status message.
     @discardableResult
@@ -215,6 +282,41 @@ struct KBClient: Sendable {
         if limit > 0 { items.append(.init(name: "limit", value: String(limit))) }
         if let kind { items.append(.init(name: "kind", value: kind)) }
         return try await get("/sparks", query: items)
+    }
+
+    // MARK: ArXiv Watch + Daily Brief
+
+    func brief() async throws -> Brief { try await get("/brief") }
+
+    func watches() async throws -> [Watch] { try await get("/watches") }
+
+    @discardableResult
+    func addWatch(kind: String, value: String) async throws -> Int {
+        struct R: Decodable { let id: Int }
+        let r: R = try await post("/watches", json: ["kind": kind, "value": value])
+        return r.id
+    }
+
+    func removeWatch(_ id: Int) async throws {
+        let (data, resp) = try await send(request(path: "/watches/\(id)", method: "DELETE"))
+        try ensureOK(resp, data)
+    }
+
+    /// Poll every enabled watch and score new papers. Network + embedding work,
+    /// so this gets a generous timeout.
+    @discardableResult
+    func refreshWatches() async throws -> RefreshSummary {
+        var req = request(path: "/watch/refresh", method: "POST")
+        req.timeoutInterval = 300
+        let (data, resp) = try await send(req)
+        try ensureOK(resp, data)
+        return try Self.decoder.decode(RefreshSummary.self, from: data)
+    }
+
+    /// Mark a candidate ingested or dismissed so it leaves the brief.
+    func setCandidateStatus(_ arxivId: String, status: String) async throws {
+        let _: [String: String] = try await post(
+            "/watch/candidates/\(encode(arxivId))/status", json: ["status": status])
     }
 
     func pdfData(_ paperId: String) async throws -> Data {

@@ -31,11 +31,12 @@ final class ForceGraph {
     private(set) var edges: [Edge] = []
     private var settleTask: Task<Void, Never>?
 
-    // Tuning.
-    private let repulsion = 9_000.0
-    private let springLength = 90.0
-    private let springK = 0.08
-    private let gravity = 0.015
+    // Tuning. Spaced for cover-sized nodes (the Graph renders each node as a
+    // book cover, not a small dot), so nodes rest well clear of one another.
+    private let repulsion = 32_000.0
+    private let springLength = 230.0
+    private let springK = 0.07
+    private let gravity = 0.012
     private let damping = 0.85
 
     var radius: (Node) -> CGFloat = { n in 8 + min(18, CGFloat(Double(n.chunks).squareRoot() * 2.2)) }
@@ -47,7 +48,9 @@ final class ForceGraph {
         let n = max(resp.nodes.count, 1)
         nodes = resp.nodes.enumerated().map { i, gn in
             let angle = Double(i) / Double(n) * 2 * .pi
-            let r = 180.0
+            // Seed on a circle sized to the node count so the layout opens out
+            // from a roomy start and settles spread apart rather than clumped.
+            let r = max(320.0, Double(n) * 26.0)
             indexOf[gn.id] = i
             return Node(id: gn.id, title: gn.title, kind: gn.kind, chunks: gn.chunks,
                         tags: gn.tags,
@@ -56,6 +59,19 @@ final class ForceGraph {
         edges = resp.edges.compactMap { e in
             guard let a = indexOf[e.source], let b = indexOf[e.target], a != b else { return nil }
             return Edge(a: a, b: b, kind: e.kind, weight: Double(max(e.weight, 0.1)))
+        }
+    }
+
+    /// Solve the layout synchronously to a settled state — no per-frame
+    /// animation. Used by the cover graph, which wants the map to land instantly
+    /// rather than visibly jiggle into place.
+    func settleNow(iterations: Int = 420) {
+        settleTask?.cancel()
+        guard nodes.count > 1 else { return }
+        var temperature = 1.0
+        for _ in 0..<iterations {
+            step(temperature: temperature)
+            temperature *= 0.99
         }
     }
 

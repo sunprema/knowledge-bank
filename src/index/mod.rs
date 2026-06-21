@@ -5,7 +5,9 @@
 pub mod meta_db;
 pub mod turbovec_index;
 
-pub use meta_db::{CortexEdgeRow, MetaDb, NewChunk, NewCortexEdge};
+pub use meta_db::{
+    Candidate, CortexEdgeRow, MetaDb, NewCandidate, NewChunk, NewCortexEdge, Watch,
+};
 pub use turbovec_index::VectorIndex;
 
 use crate::KbError;

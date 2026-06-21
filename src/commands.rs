@@ -1072,3 +1072,144 @@ pub fn excerpt(kb: &Kb, chunk_ids: Vec<String>, out: PathBuf) -> Result<(), KbEr
     let _ = (kb, chunk_ids, out);
     Err(planned("excerpt", "v0.2"))
 }
+
+// ---- ArXiv Watch + Daily Brief (the corpus grows itself; see crate::watch) ----
+
+/// `kb feed add <kind> <value>` — register a standing interest.
+pub fn feed_add(kb: &Kb, kind: String, value: String) -> Result<(), KbError> {
+    crate::watch::validate_kind(&kind)?;
+    let value = value.trim().to_string();
+    if value.is_empty() {
+        return Err(KbError::Usage("watch value must not be empty".into()));
+    }
+    let db = MetaDb::open(&kb.paths.meta_db_path())?;
+    let id = db.add_watch(&kind, &value)?;
+    let query = crate::watch::search_query_for(&kind, &value);
+    match kb.format {
+        OutputFormat::Json => println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({ "id": id, "kind": kind, "value": value, "search_query": query })).unwrap()
+        ),
+        OutputFormat::Pretty => {
+            println!("watch #{id}: {kind} {value}  (arXiv query: {query})");
+            println!("run `kb feed refresh` to fetch matching papers");
+        }
+    }
+    Ok(())
+}
+
+/// `kb feed list` — show all standing interests.
+pub fn feed_list(kb: &Kb) -> Result<(), KbError> {
+    let db = MetaDb::open(&kb.paths.meta_db_path())?;
+    let watches = db.list_watches()?;
+    match kb.format {
+        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&watches).unwrap()),
+        OutputFormat::Pretty => {
+            if watches.is_empty() {
+                println!("no watches yet — add one, e.g. `kb feed add category cs.LG`");
+                return Ok(());
+            }
+            for w in &watches {
+                let disabled = if w.enabled { "" } else { "  (disabled)" };
+                let last = w.last_refreshed_at.as_deref().unwrap_or("never");
+                println!("#{:<3} {:<9} {}{}", w.id, w.kind, w.value, disabled);
+                println!(
+                    "     arXiv query: {}   last refreshed: {}",
+                    crate::watch::search_query_for(&w.kind, &w.value),
+                    last
+                );
+            }
+            println!("{} watches", watches.len());
+        }
+    }
+    Ok(())
+}
+
+/// `kb feed rm <id>` — drop a standing interest.
+pub fn feed_remove(kb: &Kb, id: i64) -> Result<(), KbError> {
+    let db = MetaDb::open(&kb.paths.meta_db_path())?;
+    if !db.remove_watch(id)? {
+        return Err(KbError::NotFound(format!("no watch #{id}")));
+    }
+    match kb.format {
+        OutputFormat::Json => println!("{}", json!({ "removed": id })),
+        OutputFormat::Pretty => println!("removed watch #{id}"),
+    }
+    Ok(())
+}
+
+/// `kb feed refresh` — poll every enabled watch and score new papers.
+pub async fn feed_refresh(kb: &Kb) -> Result<(), KbError> {
+    let summary = crate::watch::refresh(&kb.paths, &kb.config).await?;
+    match kb.format {
+        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&summary).unwrap()),
+        OutputFormat::Pretty => {
+            println!(
+                "refreshed {} watch(es): fetched {}, {} new candidate(s)",
+                summary.watches_refreshed, summary.fetched, summary.new_candidates
+            );
+            for e in &summary.errors {
+                println!("  ! {e}");
+            }
+            if summary.watches_refreshed == 0 {
+                println!("(no enabled watches — add one with `kb feed add category cs.LG`)");
+            } else {
+                println!("see them with `kb brief`");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `kb brief` — the daily digest: new papers, a resurfaced reflection, sparks.
+pub fn brief(kb: &Kb) -> Result<(), KbError> {
+    let b = crate::watch::brief(&kb.paths, crate::watch::DEFAULT_BRIEF_PAPERS)?;
+    match kb.format {
+        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&b).unwrap()),
+        OutputFormat::Pretty => {
+            println!("KB Brief — {}", b.generated_at);
+            println!(
+                "  {} papers · {} new candidate(s) · {} watch(es)",
+                b.stats.papers, b.stats.new_candidates, b.stats.watches
+            );
+            println!();
+            println!("New papers for you:");
+            if b.new_papers.is_empty() {
+                println!("  (none — add watches with `kb feed add`, then `kb feed refresh`)");
+            } else {
+                for c in &b.new_papers {
+                    println!("  [{:.2}] {}  ({})", c.score, c.title, c.arxiv_id);
+                    let names: Vec<String> = b_connection_titles(&c.why, 2);
+                    if !names.is_empty() {
+                        println!("        connects to: {}", names.join("; "));
+                    }
+                }
+            }
+            if let Some(r) = &b.resurfaced {
+                println!();
+                println!("Resurfaced {}: {}", r.kind, r.title);
+                if !r.snippet.is_empty() {
+                    println!("  {}", r.snippet);
+                }
+            }
+            if !b.sparks.is_empty() {
+                println!();
+                println!("Fresh sparks: {} (see `kb spark`)", b.sparks.len());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Pull the first `n` connecting-paper titles out of a candidate's `why` JSON.
+fn b_connection_titles(why: &serde_json::Value, n: usize) -> Vec<String> {
+    why.get("connections")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| x.get("title").and_then(|t| t.as_str()).map(str::to_string))
+                .take(n)
+                .collect()
+        })
+        .unwrap_or_default()
+}

@@ -195,6 +195,14 @@ enum Command {
         #[arg(long)]
         daemon: bool,
     },
+    /// ArXiv Watch: standing interests that grow the corpus (`feed refresh`
+    /// fetches and scores new papers; see them in `kb brief`)
+    Feed {
+        #[command(subcommand)]
+        cmd: FeedCmd,
+    },
+    /// The daily brief: new papers for you, a resurfaced reflection, sparks
+    Brief,
     /// MCP server on stdio (for Claude Code)
     Mcp,
     /// HTTP server (loopback-only, X-KB-Key auth)
@@ -210,6 +218,24 @@ enum Command {
 enum CortexCmd {
     /// Recompute the whole associative layer from the embeddings (no re-embed)
     Rebuild,
+}
+
+#[derive(Subcommand)]
+enum FeedCmd {
+    /// Add a standing interest: `kb feed add category cs.LG`,
+    /// `kb feed add author Vaswani`, `kb feed add query "retrieval augmented"`
+    Add {
+        /// One of: category, author, query
+        kind: String,
+        /// The category code, author name, or free-text query
+        value: String,
+    },
+    /// List standing interests
+    List,
+    /// Remove a standing interest by id
+    Rm { id: i64 },
+    /// Poll every enabled watch and score new papers against the corpus
+    Refresh,
 }
 
 #[derive(Subcommand)]
@@ -355,6 +381,13 @@ async fn run(cli: Cli) -> Result<(), KbError> {
             CacheCmd::Gc => commands::cache_gc(&kb),
         },
         Command::Watch { daemon } => commands::watch(kb, daemon).await,
+        Command::Feed { cmd } => match cmd {
+            FeedCmd::Add { kind, value } => commands::feed_add(&kb, kind, value),
+            FeedCmd::List => commands::feed_list(&kb),
+            FeedCmd::Rm { id } => commands::feed_remove(&kb, id),
+            FeedCmd::Refresh => commands::feed_refresh(&kb).await,
+        },
+        Command::Brief => commands::brief(&kb),
         Command::Mcp => commands::mcp(kb).await,
         Command::Serve { port } => commands::serve(kb, port).await,
         Command::RotateKey => commands::rotate_key(&kb),

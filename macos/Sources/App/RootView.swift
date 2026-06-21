@@ -90,7 +90,7 @@ struct MainView: View {
     let client: KBClient
     @Environment(SpeechController.self) private var speech
     @Environment(ServerController.self) private var server
-    @State private var section: AppSection = .search
+    @State private var section: AppSection = .brief
     @State private var showKeyOnboarding = false
     /// Set by the Problems view to seed a roundtable objective; consumed (and
     /// cleared) by the Roundtable view on appear.
@@ -106,6 +106,12 @@ struct MainView: View {
         } detail: {
             Group {
                 switch section {
+                case .brief:
+                    BriefView(client: client, onOpenPaper: { id, title in
+                        libraryOpen = LibraryOpen(id: id, title: title)
+                        section = .library
+                    }, onManageWatches: { section = .watches })
+                case .watches: WatchesView(client: client)
                 case .search:  SearchView(client: client)
                 case .add:
                     AddView(client: client, onOpen: { result in
@@ -117,7 +123,11 @@ struct MainView: View {
                 case .chat:    ChatView(client: client)
                 case .explore: ExploreView(client: client)
                 case .personas: PersonasView()
-                case .sparks:  SparksView(client: client)
+                case .sparks:
+                    SparksView(client: client, onOpenPaper: { id, title in
+                        libraryOpen = LibraryOpen(id: id, title: title)
+                        section = .library
+                    })
                 case .problems:
                     ProblemsView(client: client, onBrainstorm: { objective in
                         roundtableSeed = objective
@@ -146,10 +156,12 @@ struct MainView: View {
 }
 
 enum AppSection: String, CaseIterable, Identifiable {
-    case search, add, library, graph, chat, explore, personas, sparks, problems, roundtable
+    case brief, search, add, library, graph, chat, explore, personas, sparks, problems, roundtable, watches
     var id: String { rawValue }
     var title: String {
         switch self {
+        case .brief: "Brief"
+        case .watches: "Watches"
         case .search: "Search"
         case .add: "Add"
         case .library: "Library"
@@ -164,6 +176,8 @@ enum AppSection: String, CaseIterable, Identifiable {
     }
     var icon: String {
         switch self {
+        case .brief: "sun.max"
+        case .watches: "binoculars"
         case .search: "magnifyingglass"
         case .add: "plus.circle"
         case .library: "books.vertical"
@@ -178,6 +192,8 @@ enum AppSection: String, CaseIterable, Identifiable {
     }
     var subtitle: String {
         switch self {
+        case .brief: "New papers, sparks & resurfaced notes"
+        case .watches: "Standing interests that grow the KB"
         case .search: "Find sections across the corpus"
         case .add: "Ingest papers, pages & PDFs"
         case .library: "Browse and read your papers"

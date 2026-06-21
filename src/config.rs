@@ -476,6 +476,11 @@ impl KbPaths {
     pub fn notes_path(&self, arxiv_id: &str) -> PathBuf {
         self.paper_dir(arxiv_id).join("notes.md")
     }
+    /// Derived "Clean Read": a faithful, citation-free rewrite of the paper body,
+    /// generated on demand and cached here. Not embedded into the index.
+    pub fn reader_path(&self, arxiv_id: &str) -> PathBuf {
+        self.paper_dir(arxiv_id).join("reader.md")
+    }
     /// Canonical body of a standalone idea (`kind = note`).
     pub fn idea_path(&self, id: &str) -> PathBuf {
         self.paper_dir(id).join("idea.md")
