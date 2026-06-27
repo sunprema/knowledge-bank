@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 // Clean Read: a faithful, citation-free rewrite of the paper, rendered with the
 // NATIVE `MarkdownText` renderer — no WKWebView. (WebKit's helper processes
@@ -21,6 +22,9 @@ struct ReaderView: View {
     @State private var genTask: Task<Void, Never>?
     @State private var selectedModelId = LLMModel.opus.id
     @State private var scrollTarget: Int?
+    @State private var conceptImage: NSImage?         // visual-abstract concept.png, if present
+    @State private var showDiagram = true
+    @State private var zoomDiagram = false
 
     enum Layout: Hashable { case clean, split }
 
@@ -60,6 +64,28 @@ struct ReaderView: View {
         .safeAreaInset(edge: .top) { topBar }
         .task(id: paperId) { await load() }
         .onDisappear { genTask?.cancel() }
+        .sheet(isPresented: $zoomDiagram) {
+            if let img = conceptImage {
+                VStack(spacing: 0) {
+                    HStack {
+                        Text("Concept diagram").font(.headline)
+                        Spacer()
+                        Button { zoomDiagram = false } label: {
+                            Image(systemName: "xmark.circle.fill").imageScale(.large)
+                        }
+                        .buttonStyle(.plain).foregroundStyle(.secondary)
+                    }
+                    .padding(12)
+                    Divider()
+                    ScrollView([.horizontal, .vertical]) {
+                        Image(nsImage: img)
+                            .resizable().interpolation(.high).scaledToFit()
+                            .padding(24)
+                    }
+                }
+                .frame(minWidth: 720, minHeight: 720)
+            }
+        }
     }
 
     private var topBar: some View {
@@ -77,6 +103,12 @@ struct ReaderView: View {
             }
             if generating { ProgressView().controlSize(.small) }
             Spacer()
+            if conceptImage != nil {
+                Button { showDiagram.toggle() } label: {
+                    Image(systemName: showDiagram ? "rectangle.3.group.fill" : "rectangle.3.group")
+                }
+                .help(showDiagram ? "Hide concept diagram" : "Show concept diagram")
+            }
             if readerMarkdown != nil && !generating {
                 Button { generate() } label: { Image(systemName: "arrow.clockwise") }
                     .help("Regenerate clean read")
@@ -107,11 +139,35 @@ struct ReaderView: View {
 
     private func markdownScroll(_ md: String) -> some View {
         ScrollView {
-            MarkdownText(markdown: md)
-                .frame(maxWidth: 760, alignment: .leading)
-                .frame(maxWidth: .infinity, alignment: .center)
-                .padding(.horizontal, 28).padding(.vertical, 24)
-                .textSelection(.enabled)
+            VStack(alignment: .leading, spacing: 0) {
+                diagramBanner
+                MarkdownText(markdown: md)
+                    .frame(maxWidth: 760, alignment: .leading)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.horizontal, 28).padding(.vertical, 24)
+                    .textSelection(.enabled)
+            }
+        }
+    }
+
+    /// The visual-abstract concept diagram (`concept.png`), shown as a banner atop
+    /// the clean read when present and toggled on. Click to enlarge.
+    @ViewBuilder private var diagramBanner: some View {
+        if showDiagram, let img = conceptImage {
+            Button { zoomDiagram = true } label: {
+                VStack(spacing: 4) {
+                    Image(nsImage: img)
+                        .resizable().interpolation(.high).scaledToFit()
+                        .frame(maxWidth: 760, maxHeight: 300)
+                    Text("Concept diagram · click to enlarge")
+                        .font(.caption2).foregroundStyle(.tertiary)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.horizontal, 28).padding(.top, 18).padding(.bottom, 8)
+            }
+            .buttonStyle(.plain)
+            .help("Concept diagram — click to enlarge")
+            Divider().padding(.horizontal, 28).padding(.bottom, 4)
         }
     }
 
@@ -123,6 +179,7 @@ struct ReaderView: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 6) {
+                        diagramBanner
                         ForEach(sections) { s in
                             MarkdownText(markdown: s.text)
                                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -216,9 +273,12 @@ struct ReaderView: View {
     private func load() async {
         genTask?.cancel()
         readerMarkdown = nil; generating = false; genError = nil
+        conceptImage = nil; zoomDiagram = false
+        let dir = server.kbRoot.appendingPathComponent(paperId)
         // Load a cached clean read straight from disk (engine writes reader.md).
-        let url = server.kbRoot.appendingPathComponent(paperId).appendingPathComponent("reader.md")
-        readerMarkdown = try? String(contentsOf: url, encoding: .utf8)
+        readerMarkdown = try? String(contentsOf: dir.appendingPathComponent("reader.md"), encoding: .utf8)
+        // Visual-abstract concept diagram, if the visual-abstract skill produced one.
+        conceptImage = NSImage(contentsOf: dir.appendingPathComponent("concept.png"))
     }
 
     /// Stream a fresh clean read from the engine, rendering progressively and

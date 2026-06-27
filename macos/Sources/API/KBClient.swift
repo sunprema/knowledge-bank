@@ -232,6 +232,47 @@ struct KBClient: Sendable {
         return r.message.isEmpty ? "Saved idea" : r.message
     }
 
+    // MARK: Notes
+    //
+    // Standalone markdown notes are `DocKind::Note` documents (the same store as
+    // `createIdea`): each is embedded and searchable. These back the Notes
+    // sidebar section.
+
+    /// Every standalone note, newest first (summary only — no bodies).
+    func notes() async throws -> [NoteSummary] { try await get("/notes") }
+
+    /// Load one note's full markdown body for editing.
+    func note(_ id: String) async throws -> NoteDetail {
+        try await get("/notes/\(encode(id))")
+    }
+
+    /// Create a note; the engine derives the id from the title and embeds it.
+    /// Returns the new note's id.
+    @discardableResult
+    func createNote(title: String, body: String, project: String? = nil, tags: [String] = []) async throws -> String {
+        struct Result: Decodable { var ok = false; var id = "" }
+        var json: [String: Any] = ["title": title, "body": body, "tags": tags]
+        if let project { json["project"] = project }
+        let r: Result = try await post("/notes", json: json)
+        return r.id
+    }
+
+    /// Overwrite a note in place (id stays stable even if the title changes);
+    /// the engine re-embeds it.
+    @discardableResult
+    func updateNote(_ id: String, title: String, body: String, project: String? = nil, tags: [String] = []) async throws -> String {
+        struct Result: Decodable { var ok = false; var id = "" }
+        var json: [String: Any] = ["title": title, "body": body, "tags": tags]
+        if let project { json["project"] = project }
+        let r: Result = try await put("/notes/\(encode(id))", json: json)
+        return r.id
+    }
+
+    func deleteNote(_ id: String) async throws {
+        let (data, resp) = try await send(request(path: "/notes/\(encode(id))", method: "DELETE"))
+        try ensureOK(resp, data)
+    }
+
     /// Ingest a new document into the corpus — the `kb add` flow, streamed.
     /// Pass exactly one of: an arXiv id/URL, a web page `url`, or a local
     /// `pdfPath`. The engine pushes `IngestEvent`s as Server-Sent Events while
@@ -311,6 +352,24 @@ struct KBClient: Sendable {
         let (data, resp) = try await send(req)
         try ensureOK(resp, data)
         return try Self.decoder.decode(RefreshSummary.self, from: data)
+    }
+
+    // MARK: Bookmarks
+
+    /// Bookmarked documents, most recently bookmarked first (full metadata).
+    func bookmarks() async throws -> [PaperMetadata] { try await get("/bookmarks") }
+
+    func addBookmark(_ paperId: String) async throws {
+        var req = request(path: "/bookmarks", method: "POST")
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try JSONSerialization.data(withJSONObject: ["paper_id": paperId])
+        let (data, resp) = try await send(req)
+        try ensureOK(resp, data)
+    }
+
+    func removeBookmark(_ paperId: String) async throws {
+        let (data, resp) = try await send(request(path: "/bookmarks/\(encode(paperId))", method: "DELETE"))
+        try ensureOK(resp, data)
     }
 
     /// Mark a candidate ingested or dismissed so it leaves the brief.

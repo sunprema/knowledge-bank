@@ -29,6 +29,7 @@ struct PaperDetailView: View {
     @State private var toast: String?
     @State private var explain: ExplainRequest?
     @State private var showNotes = false
+    @State private var bookmarked = false
 
     enum ConnTab: Hashable { case similar, linked, sparks }
     struct LinkConn: Identifiable { let id: String; let title: String }
@@ -133,6 +134,13 @@ struct PaperDetailView: View {
     /// The action buttons (read aloud, toggle PDF) shared by the window toolbar
     /// and the inline split-pane header.
     @ViewBuilder private func actions(_ detail: PaperDetail) -> some View {
+        Button {
+            Task { await toggleBookmark() }
+        } label: {
+            Label(bookmarked ? "Bookmarked" : "Bookmark",
+                  systemImage: bookmarked ? "bookmark.fill" : "bookmark")
+        }
+        .help(bookmarked ? "Remove from Bookmarks" : "Add to Bookmarks")
         ReadAloudButton(text: readableSummary(detail), title: detail.metadata.title)
         Button {
             withAnimation(.snappy) { readerMode.toggle() }
@@ -350,6 +358,7 @@ struct PaperDetailView: View {
         async let g = try? await client.graph(neighbors: 0)   // explicit links only
         async let s = try? await client.sparks(limit: 200)
         detail = await d
+        bookmarked = (await d)?.bookmarked ?? false
         // The body lives in `<kbRoot>/<id>/sections.md` (same disk-read pattern
         // as ReaderView's reader.md). Shown when there's no PDF to render.
         let sections = server.kbRoot.appendingPathComponent(paperId).appendingPathComponent("sections.md")
@@ -394,6 +403,21 @@ struct PaperDetailView: View {
             } catch {
                 await flashToast("Couldn't add note")
             }
+        }
+    }
+
+    /// Toggle the bookmark. Flips the icon optimistically, then reverts on
+    /// failure so the toolbar always reflects the persisted state.
+    private func toggleBookmark() async {
+        let target = !bookmarked
+        bookmarked = target
+        do {
+            if target { try await client.addBookmark(paperId) }
+            else { try await client.removeBookmark(paperId) }
+            await flashToast(target ? "Added to Bookmarks" : "Removed from Bookmarks")
+        } catch {
+            bookmarked = !target
+            await flashToast("Couldn't update bookmark")
         }
     }
 

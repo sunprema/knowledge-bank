@@ -120,6 +120,8 @@ fn router(state: Shared) -> Router {
         .route("/watches/{watch_id}", axum::routing::delete(remove_watch))
         .route("/watch/refresh", post(watch_refresh))
         .route("/watch/candidates/{arxiv_id}/status", post(set_candidate_status))
+        .route("/bookmarks", get(list_bookmarks).post(add_bookmark))
+        .route("/bookmarks/{paper_id}", axum::routing::delete(remove_bookmark))
         .route("/search", post(search))
         .route("/problems", post(problems))
         .route("/chat", post(chat))
@@ -128,6 +130,8 @@ fn router(state: Shared) -> Router {
         .route("/brainstorm/{session_id}/interject", post(interject))
         .route("/ingest", post(ingest))
         .route("/ideas", post(create_idea))
+        .route("/notes", get(list_notes).post(create_note))
+        .route("/notes/{note_id}", get(get_note).put(update_note).delete(delete_note))
         .route("/reflections", post(create_reflection))
         .route("/compose/assist", post(compose_assist))
         .route("/chunks/{chunk_id}", get(get_chunk))
@@ -359,11 +363,13 @@ async fn get_paper(
     // the PDF" instead of showing the document's markdown content.
     let pdf = state.paths.pdf_path(&paper_id);
     let pdf_path = if pdf.exists() { Some(pdf) } else { None };
+    let bookmarked = MetaDb::open(&state.paths.meta_db_path())?.is_bookmarked(&paper_id)?;
     Ok(Json(json!({
         "metadata": meta,
         "notes": notes,
         "pdf_path": pdf_path,
         "has_reader": state.paths.reader_path(&paper_id).exists(),
+        "bookmarked": bookmarked,
     })))
 }
 
@@ -578,6 +584,57 @@ async fn remove_watch(
         return Err(KbError::NotFound(format!("no watch #{watch_id}")).into());
     }
     Ok(Json(json!({ "removed": watch_id })))
+}
+
+// ---- bookmarks -------------------------------------------------------------
+
+/// Bookmarked documents, most recently bookmarked first. Returns full metadata
+/// (like `/papers`) so the UI can render covers without a second round-trip.
+/// Bookmarks whose document no longer exists are silently skipped.
+async fn list_bookmarks(
+    State(state): State<Shared>,
+) -> Result<Json<Vec<PaperMetadata>>, ApiError> {
+    let db = MetaDb::open(&state.paths.meta_db_path())?;
+    let mut rows = Vec::new();
+    for id in db.list_bookmark_ids()? {
+        match PaperMetadata::load(&state.paths.metadata_path(&id)) {
+            Ok(m) => rows.push(m),
+            Err(e) => tracing::warn!("skipping bookmark {id}: {e}"),
+        }
+    }
+    Ok(Json(rows))
+}
+
+#[derive(Deserialize)]
+struct AddBookmarkRequest {
+    paper_id: String,
+}
+
+async fn add_bookmark(
+    State(state): State<Shared>,
+    Json(req): Json<AddBookmarkRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let paper_id = req.paper_id.trim().to_string();
+    if paper_id.is_empty() {
+        return Err(KbError::Usage("paper_id must not be empty".into()).into());
+    }
+    if !state.paths.metadata_path(&paper_id).exists() {
+        return Err(KbError::NotFound(format!("{paper_id} is not in the KB")).into());
+    }
+    let db = MetaDb::open(&state.paths.meta_db_path())?;
+    let created = db.add_bookmark(&paper_id)?;
+    Ok(Json(json!({ "paper_id": paper_id, "bookmarked": true, "created": created })))
+}
+
+async fn remove_bookmark(
+    State(state): State<Shared>,
+    Path(paper_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let db = MetaDb::open(&state.paths.meta_db_path())?;
+    if !db.remove_bookmark(&paper_id)? {
+        return Err(KbError::NotFound(format!("{paper_id} is not bookmarked")).into());
+    }
+    Ok(Json(json!({ "paper_id": paper_id, "bookmarked": false })))
 }
 
 /// Poll every enabled watch and score new papers against the corpus. Network +
@@ -995,6 +1052,160 @@ async fn create_idea(
     })
     .await?;
     Ok(Json(json!({ "ok": true, "id": report.paper_id, "chunks": report.chunks })))
+}
+
+/// One row in the Notes list: enough to render the master list without reading
+/// every note's full body.
+#[derive(serde::Serialize)]
+struct NoteSummary {
+    id: String,
+    title: String,
+    project: String,
+    updated_at: String,
+    /// First ~200 chars of the body, for the list's secondary line.
+    preview: String,
+}
+
+/// List every standalone note (`DocKind::Note`), newest first. Backs the
+/// Notes sidebar section. Notes are the same `idea.md` documents created by
+/// `POST /ideas` / Roundtable syntheses, so they show up here too.
+async fn list_notes(State(state): State<Shared>) -> Result<Json<Vec<NoteSummary>>, ApiError> {
+    let db = MetaDb::open(&state.paths.meta_db_path())?;
+    let mut rows = Vec::new();
+    for id in db.paper_ids_by_kind(DocKind::Note)? {
+        let Ok(meta) = PaperMetadata::load(&state.paths.metadata_path(&id)) else {
+            continue;
+        };
+        let body = std::fs::read_to_string(state.paths.idea_path(&id)).unwrap_or_default();
+        let preview: String = body.trim().chars().take(200).collect();
+        rows.push(NoteSummary {
+            id,
+            title: meta.title,
+            project: meta.project.unwrap_or_else(|| "global".into()),
+            updated_at: meta.updated_at,
+            preview,
+        });
+    }
+    // Newest first by ISO-8601 `updated_at` (lexical sort == chronological).
+    rows.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    Ok(Json(rows))
+}
+
+/// Fetch one note's full markdown body plus its metadata (for the editor).
+async fn get_note(
+    State(state): State<Shared>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let meta_path = state.paths.metadata_path(&id);
+    if !meta_path.exists() {
+        return Err(KbError::NotFound(format!("{id} is not in the KB")).into());
+    }
+    let meta = PaperMetadata::load(&meta_path)?;
+    if meta.kind != DocKind::Note {
+        return Err(KbError::Usage(format!("{id} is not a note")).into());
+    }
+    let body = std::fs::read_to_string(state.paths.idea_path(&id)).unwrap_or_default();
+    Ok(Json(json!({
+        "id": id,
+        "title": meta.title,
+        "project": meta.project.unwrap_or_else(|| "global".into()),
+        "body": body,
+        "tags": meta.tags,
+        "updated_at": meta.updated_at,
+    })))
+}
+
+/// Create (POST `/notes`) or update (PUT `/notes/{id}`) payload. Body and
+/// title are required by the pipeline; empty tags on an update keep existing
+/// ones.
+#[derive(Deserialize)]
+struct NotePayload {
+    title: String,
+    #[serde(default)]
+    body: String,
+    project: Option<String>,
+    #[serde(default)]
+    tags: Vec<String>,
+}
+
+/// Create a new note. The id (slug) is derived from the title; re-using a
+/// title upserts the same note (matching `ingest_idea`'s semantics).
+async fn create_note(
+    State(state): State<Shared>,
+    Json(req): Json<NotePayload>,
+) -> Result<Json<Value>, ApiError> {
+    let paths = state.paths.clone();
+    let config = state.config.clone();
+    let report = run_blocking(move || async move {
+        let spec = pipeline::IdeaSpec {
+            slug: None,
+            project: req.project.unwrap_or_else(|| "global".into()),
+            title: req.title,
+            body: req.body,
+            tags: req.tags,
+            links: Vec::new(),
+        };
+        pipeline::ingest_idea(&paths, &config, &spec, &|_| {}).await
+    })
+    .await?;
+    Ok(Json(json!({ "ok": true, "id": report.paper_id })))
+}
+
+/// Update a note in place. Pinning the slug to the path id keeps the id stable
+/// even when the title changes. Refuses to clobber a non-note document.
+async fn update_note(
+    State(state): State<Shared>,
+    Path(id): Path<String>,
+    Json(req): Json<NotePayload>,
+) -> Result<Json<Value>, ApiError> {
+    let meta_path = state.paths.metadata_path(&id);
+    if meta_path.exists() {
+        let meta = PaperMetadata::load(&meta_path)?;
+        if meta.kind != DocKind::Note {
+            return Err(KbError::Usage(format!("{id} is not a note")).into());
+        }
+    }
+    let paths = state.paths.clone();
+    let config = state.config.clone();
+    let report = run_blocking(move || async move {
+        let spec = pipeline::IdeaSpec {
+            slug: Some(id),
+            project: req.project.unwrap_or_else(|| "global".into()),
+            title: req.title,
+            body: req.body,
+            tags: req.tags,
+            links: Vec::new(),
+        };
+        pipeline::ingest_idea(&paths, &config, &spec, &|_| {}).await
+    })
+    .await?;
+    Ok(Json(json!({ "ok": true, "id": report.paper_id })))
+}
+
+/// Delete a note: wipe its index/db traces, then remove its folder. Guarded so
+/// it can never delete an ingested paper.
+async fn delete_note(
+    State(state): State<Shared>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let meta_path = state.paths.metadata_path(&id);
+    if !meta_path.exists() {
+        return Err(KbError::NotFound(format!("{id} is not in the KB")).into());
+    }
+    let meta = PaperMetadata::load(&meta_path)?;
+    if meta.kind != DocKind::Note {
+        return Err(KbError::Usage(format!("{id} is not a note; refusing to delete")).into());
+    }
+    let paths = state.paths.clone();
+    let config = state.config.clone();
+    run_blocking(move || async move {
+        pipeline::remove_paper_from_stores(&paths, &config, &id)?;
+        std::fs::remove_dir_all(paths.paper_dir(&id))
+            .map_err(|e| KbError::Index(format!("folder delete failed (index already updated): {e}")))?;
+        Ok(())
+    })
+    .await?;
+    Ok(Json(json!({ "ok": true })))
 }
 
 #[derive(Deserialize)]

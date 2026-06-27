@@ -113,6 +113,30 @@ struct PaperDetail: Codable {
     var pdfPath: String?
     /// Whether a cached Clean Read (`reader.md`) exists for this paper.
     var hasReader: Bool = false
+    /// Whether the user has bookmarked this document.
+    var bookmarked: Bool = false
+}
+
+// MARK: - Notes
+
+/// A row in the Notes list (`GET /notes`). The body isn't loaded until the
+/// note is opened in the editor — `preview` is the first ~200 chars.
+struct NoteSummary: Codable, Identifiable, Hashable {
+    let id: String
+    var title: String
+    var project: String = "global"
+    var updatedAt: String = ""
+    var preview: String = ""
+}
+
+/// A single note's full content (`GET /notes/{id}`), for the editor.
+struct NoteDetail: Codable, Identifiable {
+    let id: String
+    var title: String
+    var project: String = "global"
+    var body: String = ""
+    var tags: [String] = []
+    var updatedAt: String = ""
 }
 
 // MARK: - Search

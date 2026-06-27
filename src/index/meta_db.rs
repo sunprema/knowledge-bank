@@ -235,6 +235,16 @@ CREATE TABLE IF NOT EXISTS watch_candidates (
 );
 CREATE INDEX IF NOT EXISTS idx_watch_cand_status ON watch_candidates(status);
 CREATE INDEX IF NOT EXISTS idx_watch_cand_score ON watch_candidates(score);
+
+-- Bookmarks: documents the user has flagged to return to. Pure user-authored
+-- state (no embeddings, can't be rebuilt from canonical files), so it lives in
+-- the persistent schema and survives `kb reindex`. One row per document; the
+-- `paper_id` is the same id used everywhere else (papers, web pages, ideas, …).
+CREATE TABLE IF NOT EXISTS bookmarks (
+  paper_id   TEXT PRIMARY KEY,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_bookmarks_created ON bookmarks(created_at);
 ";
 
 const CHUNK_COLUMNS: &str = "id, chunk_id, paper_id, section_type, ordinal, content_hash, \
@@ -940,6 +950,46 @@ impl MetaDb {
         let n = self
             .conn
             .execute("DELETE FROM watches WHERE id = ?1", [id])?;
+        Ok(n > 0)
+    }
+
+    // ---- Bookmarks (documents the user flagged to return to) ----
+
+    /// Bookmark a document (idempotent — re-bookmarking keeps the original
+    /// `created_at`). Returns true if a new bookmark was created.
+    pub fn add_bookmark(&self, paper_id: &str) -> Result<bool, KbError> {
+        let n = self.conn.execute(
+            "INSERT OR IGNORE INTO bookmarks (paper_id, created_at) VALUES (?1, ?2)",
+            rusqlite::params![paper_id, crate::now_rfc3339()],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Remove a bookmark. Returns true if a row was actually removed.
+    pub fn remove_bookmark(&self, paper_id: &str) -> Result<bool, KbError> {
+        let n = self
+            .conn
+            .execute("DELETE FROM bookmarks WHERE paper_id = ?1", [paper_id])?;
+        Ok(n > 0)
+    }
+
+    /// Bookmarked document ids, most recently bookmarked first.
+    pub fn list_bookmark_ids(&self) -> Result<Vec<String>, KbError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT paper_id FROM bookmarks ORDER BY created_at DESC")?;
+        let rows = stmt
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    pub fn is_bookmarked(&self, paper_id: &str) -> Result<bool, KbError> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM bookmarks WHERE paper_id = ?1",
+            [paper_id],
+            |r| r.get(0),
+        )?;
         Ok(n > 0)
     }
 

@@ -119,6 +119,12 @@ struct MainView: View {
                         section = .library
                     })
                 case .library: LibraryView(client: client, openRequest: $libraryOpen)
+                case .bookmarks:
+                    BookmarksView(client: client, onOpenPaper: { id, title in
+                        libraryOpen = LibraryOpen(id: id, title: title)
+                        section = .library
+                    })
+                case .notes:   NotesView(client: client)
                 case .graph:   GraphView(client: client)
                 case .chat:    ChatView(client: client)
                 case .explore: ExploreView(client: client)
@@ -156,7 +162,7 @@ struct MainView: View {
 }
 
 enum AppSection: String, CaseIterable, Identifiable {
-    case brief, search, add, library, graph, chat, explore, personas, sparks, problems, roundtable, watches
+    case brief, search, add, library, bookmarks, notes, graph, chat, explore, personas, sparks, problems, roundtable, watches
     var id: String { rawValue }
     var title: String {
         switch self {
@@ -165,6 +171,8 @@ enum AppSection: String, CaseIterable, Identifiable {
         case .search: "Search"
         case .add: "Add"
         case .library: "Library"
+        case .bookmarks: "Bookmarks"
+        case .notes: "Notes"
         case .graph: "Graph"
         case .chat: "Chat"
         case .explore: "Explore"
@@ -181,6 +189,8 @@ enum AppSection: String, CaseIterable, Identifiable {
         case .search: "magnifyingglass"
         case .add: "plus.circle"
         case .library: "books.vertical"
+        case .bookmarks: "bookmark"
+        case .notes: "note.text"
         case .graph: "point.3.connected.trianglepath.dotted"
         case .chat: "bubble.left.and.bubble.right"
         case .explore: "point.3.filled.connected.trianglepath.dotted"
@@ -197,6 +207,8 @@ enum AppSection: String, CaseIterable, Identifiable {
         case .search: "Find sections across the corpus"
         case .add: "Ingest papers, pages & PDFs"
         case .library: "Browse and read your papers"
+        case .bookmarks: "Saved reading materials"
+        case .notes: "Write & keep markdown notes"
         case .graph: "Explore connections visually"
         case .chat: "Ask questions over everything"
         case .explore: "Branch & merge a canvas chat"

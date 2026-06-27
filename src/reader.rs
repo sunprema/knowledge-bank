@@ -42,12 +42,22 @@ Rules:\n\
 - This is a FAITHFUL REWRITE, not a summary. Preserve the argument, the \
 definitions, the methods, and every quantitative claim and result. Do not omit \
 steps of reasoning or drop technical detail.\n\
-- Remove inline citation clutter: parenthetical author-year citations like \
-\"(Bakalova et al., 2025; Geva et al., 2023)\", bracketed numeric references \
-like \"[12]\", and cross-reference scaffolding like \"as shown in Section 4\", \
-\"see Figure 2\", \"Table 3 reports\". When a cited result is load-bearing, keep \
-the CLAIM in prose and simply drop the citation marker. Never invent or add \
-citations.\n\
+- Remove EVERY citation marker, in all of its forms, no matter the brackets or \
+punctuation. This includes:\n\
+  - parenthetical author-year: \"(Bakalova et al., 2025; Geva et al., 2023)\"\n\
+  - bracketed author-year, including comma-separated lists: \"[Khattab et al., \
+2021, Smith, 2025, OpenAI, 2025b, Wu et al., 2025]\"\n\
+  - bracketed numerics and superscript reference numbers: \"[12]\", \"[3, 7]\"\n\
+  - inline narrative citations where the names ARE the subject: \"Wu et al. \
+(2021) show that X\" or \"as Smith (2025) argues, X\" — rewrite to state the \
+claim directly (\"X\"), dropping the names and year.\n\
+  - cross-reference scaffolding: \"as shown in Section 4\", \"see Figure 2\", \
+\"Table 3 reports\".\n\
+- When a citation sits mid-sentence, delete it AND repair the surrounding text \
+so the sentence stays grammatical and flows naturally — never leave a dangling \
+bracket, a doubled or stranded comma, an empty \"()\", or an \"and .\" gap. When a \
+cited result is load-bearing, keep the CLAIM in prose and simply drop the \
+marker. Never invent or add citations.\n\
 - Keep the section heading(s). Output GitHub-flavored Markdown. Preserve display \
 and inline math verbatim (\\(...\\), \\[...\\], $...$, $$...$$) so it still \
 renders.\n\

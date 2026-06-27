@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 /// A request to open a specific paper in the Library, handed in from another
 /// section (the Add view opens a just-ingested document this way).
@@ -27,6 +28,7 @@ struct LibraryView: View {
     @State private var layout: Layout = .grid
     @State private var preview: PaperMetadata?
     @State private var hoverID: String?
+    @State private var copiedID: String?            // shows a brief ✓ on the copied card
     @Namespace private var coverNS
 
     enum Layout: Hashable { case grid, list }
@@ -190,8 +192,43 @@ struct LibraryView: View {
                     .lineLimit(1)
                     .frame(width: coverW, alignment: .leading)
             }
+            idRow(paper)
         }
         .contentShape(Rectangle())
+        .contextMenu {
+            Button { copyID(paper.id) } label: { Label("Copy paper ID", systemImage: "doc.on.doc") }
+        }
+    }
+
+    /// The paper's canonical id (the value every skill and `kb` command uses),
+    /// shown small under each cover with a one-click copy button.
+    private func idRow(_ paper: PaperMetadata) -> some View {
+        HStack(spacing: 4) {
+            Text(paper.id)
+                .font(.system(.caption2, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .lineLimit(1).truncationMode(.middle)
+                .textSelection(.enabled)
+            Button { copyID(paper.id) } label: {
+                Image(systemName: copiedID == paper.id ? "checkmark" : "doc.on.doc")
+                    .font(.caption2)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(copiedID == paper.id ? Color.green : Color.secondary)
+            .help("Copy paper ID")
+        }
+        .frame(width: coverW, alignment: .leading)
+    }
+
+    /// Copy a paper id to the pasteboard and flash a ✓ briefly.
+    private func copyID(_ id: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(id, forType: .string)
+        copiedID = id
+        Task {
+            try? await Task.sleep(for: .seconds(1.2))
+            if copiedID == id { copiedID = nil }
+        }
     }
 
     // The expanded "book detail": the cover morphs out of the grid (matched
@@ -225,6 +262,20 @@ struct LibraryView: View {
                         if !paper.publishedAt.isEmpty { Chip(text: Theme.year(paper.publishedAt)) }
                         ForEach(paper.categories.prefix(3), id: \.self) { Chip(text: $0) }
                         ForEach(paper.tags.prefix(3), id: \.self) { Chip(text: $0, color: .accentColor, filled: true) }
+                    }
+                    HStack(spacing: 8) {
+                        Image(systemName: "number").font(.caption).foregroundStyle(.tertiary)
+                        Text(paper.id)
+                            .font(.system(.callout, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                        Button { copyID(paper.id) } label: {
+                            Label(copiedID == paper.id ? "Copied" : "Copy ID",
+                                  systemImage: copiedID == paper.id ? "checkmark" : "doc.on.doc")
+                        }
+                        .buttonStyle(.bordered).controlSize(.small)
+                        .tint(copiedID == paper.id ? .green : .accentColor)
+                        .help("Copy the paper ID used by every skill and kb command")
                     }
                     if !paper.abstract.isEmpty {
                         ScrollView {
@@ -354,6 +405,9 @@ private struct PaperRow: View {
                             .font(.subheadline).foregroundStyle(.secondary).lineLimit(1)
                     }
                     HStack(spacing: 6) {
+                        Text(paper.arxivId)
+                            .font(.system(.caption2, design: .monospaced))
+                            .foregroundStyle(.tertiary)
                         if !paper.publishedAt.isEmpty { Chip(text: Theme.year(paper.publishedAt)) }
                         ForEach(paper.categories.prefix(3), id: \.self) { Chip(text: $0) }
                         ForEach(paper.tags.prefix(3), id: \.self) { Chip(text: $0, color: .accentColor, filled: true) }
