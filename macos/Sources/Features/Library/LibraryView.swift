@@ -6,6 +6,8 @@ import AppKit
 struct LibraryOpen: Equatable {
     let id: String
     let title: String
+    /// Open the paper directly in Book mode (used by the Books shelf).
+    var showBook = false
 }
 
 // Browse the corpus. A filterable list of documents; opening one (from the list
@@ -29,6 +31,8 @@ struct LibraryView: View {
     @State private var preview: PaperMetadata?
     @State private var hoverID: String?
     @State private var copiedID: String?            // shows a brief ✓ on the copied card
+    /// Papers that should open straight into Book mode (came from the Books shelf).
+    @State private var openBookIds: Set<String> = []
     @Namespace private var coverNS
 
     enum Layout: Hashable { case grid, list }
@@ -64,6 +68,7 @@ struct LibraryView: View {
     /// fetches the paper by id.
     private func consumeOpenRequest() {
         guard let req = openRequest.wrappedValue else { return }
+        if req.showBook { openBookIds.insert(req.id) }
         nav.open(req.id, title: req.title)
         openRequest.wrappedValue = nil
     }
@@ -89,7 +94,8 @@ struct LibraryView: View {
                 home
             case .paper(let id):
                 PaperDetailView(client: client, paperId: id,
-                                onOpenPaper: { pid, title in nav.open(pid, title: title) })
+                                onOpenPaper: { pid, title in nav.open(pid, title: title) },
+                                openBook: openBookIds.contains(id))
                     .id(id)   // fresh detail state per paper
             }
         }
@@ -195,8 +201,20 @@ struct LibraryView: View {
             idRow(paper)
         }
         .contentShape(Rectangle())
-        .contextMenu {
-            Button { copyID(paper.id) } label: { Label("Copy paper ID", systemImage: "doc.on.doc") }
+        .contextMenu { paperMenu(paper) }
+    }
+
+    /// Shared right-click menu for a paper (cover card + list row): copy its id,
+    /// and hand the paper to Claude to generate a beautiful HTML book.
+    @ViewBuilder private func paperMenu(_ paper: PaperMetadata) -> some View {
+        Button { copyID(paper.id) } label: { Label("Copy paper ID", systemImage: "doc.on.doc") }
+        Divider()
+        Button {
+            if !PaperBook.launchBuild(id: paper.arxivId, title: paper.title) {
+                error = "Couldn't open Terminal to build the book."
+            }
+        } label: {
+            Label("Build paper book with Claude", systemImage: "books.vertical")
         }
     }
 
@@ -323,6 +341,7 @@ struct LibraryView: View {
                         PaperRow(paper: paper)
                     }
                     .buttonStyle(.plain)
+                    .contextMenu { paperMenu(paper) }
                 }
             }
             .padding(16)

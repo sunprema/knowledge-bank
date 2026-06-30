@@ -12,6 +12,8 @@ struct PaperDetailView: View {
     var inlineChrome = false
     /// When set (split panes), show a close-split button in the inline header.
     var onClosePane: (() -> Void)? = nil
+    /// Open straight into Book mode (used when arriving from the Books shelf).
+    var openBook = false
 
     @Environment(ServerController.self) private var server
 
@@ -30,6 +32,9 @@ struct PaperDetailView: View {
     @State private var explain: ExplainRequest?
     @State private var showNotes = false
     @State private var bookmarked = false
+    /// Book mode shows the generated HTML book (`write-paper-book`) in a WebView.
+    @State private var bookMode = false
+    @State private var bookReload = 0
 
     enum ConnTab: Hashable { case similar, linked, sparks }
     struct LinkConn: Identifiable { let id: String; let title: String }
@@ -38,15 +43,27 @@ struct PaperDetailView: View {
     init(client: KBClient, paperId: String,
          onOpenPaper: @escaping (String, String) -> Void = { _, _ in },
          inlineChrome: Bool = false,
-         onClosePane: (() -> Void)? = nil) {
+         onClosePane: (() -> Void)? = nil,
+         openBook: Bool = false) {
         self.client = client
         self.paperId = paperId
         self.onOpenPaper = onOpenPaper
         self.inlineChrome = inlineChrome
         self.onClosePane = onClosePane
+        self.openBook = openBook
         // Single view shows the PDF beside the paper by default; split panes
         // start as text (toggle per pane) to avoid a cramped 4-column layout.
         _showPDF = State(initialValue: !inlineChrome)
+        // Arriving from the Books shelf jumps straight into the book; the Book
+        // toggle / main-content still guard on the book actually existing on disk.
+        _bookMode = State(initialValue: openBook)
+    }
+
+    /// The book folder for this paper under the corpus root, and its landing page.
+    private var bookDir: URL { PaperBook.bookDir(root: server.kbRoot, id: paperId) }
+    private var bookIndexURL: URL? {
+        let url = PaperBook.indexURL(root: server.kbRoot, id: paperId)
+        return FileManager.default.fileExists(atPath: url.path) ? url : nil
     }
 
     var body: some View {
@@ -89,7 +106,9 @@ struct PaperDetailView: View {
 
     @ViewBuilder private var mainContent: some View {
         if let detail {
-            if readerMode {
+            if bookMode, let idx = bookIndexURL {
+                BookWebView(url: idx, readAccess: bookDir, reloadToken: bookReload, bookDir: bookDir)
+            } else if readerMode {
                 ReaderView(client: client, paperId: paperId, title: detail.metadata.title,
                            hasPDF: detail.pdfPath != nil)
             } else if showPDF && detail.pdfPath != nil {
@@ -142,22 +161,68 @@ struct PaperDetailView: View {
         }
         .help(bookmarked ? "Remove from Bookmarks" : "Add to Bookmarks")
         ReadAloudButton(text: readableSummary(detail), title: detail.metadata.title)
-        Button {
-            withAnimation(.snappy) { readerMode.toggle() }
-        } label: {
-            Label(readerMode ? "Paper" : "Reader",
-                  systemImage: readerMode ? "doc.richtext" : "text.alignleft")
-        }
-        .help(readerMode ? "Back to paper view" : "Reader mode — reflowable text with math")
-        if !readerMode && detail.pdfPath != nil {
+        if !bookMode {
             Button {
-                withAnimation(.snappy) { showPDF.toggle() }
+                withAnimation(.snappy) { readerMode.toggle() }
             } label: {
-                Label(showPDF ? "Hide PDF" : "Show PDF",
-                      systemImage: showPDF ? "rectangle.righthalf.inset.filled"
-                                           : "rectangle.righthalf.inset")
+                Label(readerMode ? "Paper" : "Reader",
+                      systemImage: readerMode ? "doc.richtext" : "text.alignleft")
             }
-            .help(showPDF ? "Hide the PDF panel" : "Show the PDF beside the paper")
+            .help(readerMode ? "Back to paper view" : "Reader mode — reflowable text with math")
+            if !readerMode && detail.pdfPath != nil {
+                Button {
+                    withAnimation(.snappy) { showPDF.toggle() }
+                } label: {
+                    Label(showPDF ? "Hide PDF" : "Show PDF",
+                          systemImage: showPDF ? "rectangle.righthalf.inset.filled"
+                                               : "rectangle.righthalf.inset")
+                }
+                .help(showPDF ? "Hide the PDF panel" : "Show the PDF beside the paper")
+            }
+        }
+        bookActions(detail)
+    }
+
+    /// Reading / building the generated HTML book (`write-paper-book`). When a book
+    /// exists on disk, toggle into it; otherwise offer to build one with Claude.
+    @ViewBuilder private func bookActions(_ detail: PaperDetail) -> some View {
+        if bookIndexURL != nil {
+            Button {
+                withAnimation(.snappy) { bookMode.toggle(); if bookMode { readerMode = false } }
+            } label: {
+                Label(bookMode ? "Paper" : "Book",
+                      systemImage: bookMode ? "doc.richtext" : "books.vertical")
+            }
+            .help(bookMode ? "Back to paper view" : "Read the generated HTML book")
+            if bookMode {
+                Button { bookReload += 1 } label: { Label("Reload", systemImage: "arrow.clockwise") }
+                    .help("Reload the book from disk")
+                Button { if let u = bookIndexURL { NSWorkspace.shared.open(u) } } label: {
+                    Label("Open in Browser", systemImage: "safari")
+                }
+                .help("Open the book in your default browser")
+                Button { launchBookBuild(detail) } label: { Label("Rebuild", systemImage: "wand.and.stars") }
+                    .help("Regenerate the book with Claude")
+            }
+        } else {
+            Button { launchBookBuild(detail) } label: { Label("Build Book", systemImage: "books.vertical") }
+                .help("Generate a beautiful HTML book from this paper with Claude")
+        }
+    }
+
+    private func launchBookBuild(_ detail: PaperDetail) {
+        if PaperBook.launchBuild(id: paperId, title: detail.metadata.title) {
+            showToast("Building the book in Terminal — reopen Book when it finishes.")
+        } else {
+            showToast("Couldn't open Terminal to build the book.")
+        }
+    }
+
+    private func showToast(_ message: String) {
+        toast = message
+        Task {
+            try? await Task.sleep(for: .seconds(3))
+            if toast == message { toast = nil }
         }
     }
 

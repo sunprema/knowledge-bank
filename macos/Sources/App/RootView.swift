@@ -119,6 +119,11 @@ struct MainView: View {
                         section = .library
                     })
                 case .library: LibraryView(client: client, openRequest: $libraryOpen)
+                case .books:
+                    BooksView(client: client, onOpenBook: { id, title in
+                        libraryOpen = LibraryOpen(id: id, title: title, showBook: true)
+                        section = .library
+                    })
                 case .bookmarks:
                     BookmarksView(client: client, onOpenPaper: { id, title in
                         libraryOpen = LibraryOpen(id: id, title: title)
@@ -162,7 +167,7 @@ struct MainView: View {
 }
 
 enum AppSection: String, CaseIterable, Identifiable {
-    case brief, search, add, library, bookmarks, notes, graph, chat, explore, personas, sparks, problems, roundtable, watches
+    case brief, search, add, library, books, bookmarks, notes, graph, chat, explore, personas, sparks, problems, roundtable, watches
     var id: String { rawValue }
     var title: String {
         switch self {
@@ -171,6 +176,7 @@ enum AppSection: String, CaseIterable, Identifiable {
         case .search: "Search"
         case .add: "Add"
         case .library: "Library"
+        case .books: "Books"
         case .bookmarks: "Bookmarks"
         case .notes: "Notes"
         case .graph: "Graph"
@@ -189,6 +195,7 @@ enum AppSection: String, CaseIterable, Identifiable {
         case .search: "magnifyingglass"
         case .add: "plus.circle"
         case .library: "books.vertical"
+        case .books: "book.closed"
         case .bookmarks: "bookmark"
         case .notes: "note.text"
         case .graph: "point.3.connected.trianglepath.dotted"
@@ -207,6 +214,7 @@ enum AppSection: String, CaseIterable, Identifiable {
         case .search: "Find sections across the corpus"
         case .add: "Ingest papers, pages & PDFs"
         case .library: "Browse and read your papers"
+        case .books: "Papers turned into HTML books"
         case .bookmarks: "Saved reading materials"
         case .notes: "Write & keep markdown notes"
         case .graph: "Explore connections visually"
