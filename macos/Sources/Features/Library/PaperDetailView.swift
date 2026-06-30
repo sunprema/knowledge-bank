@@ -12,8 +12,15 @@ struct PaperDetailView: View {
     var inlineChrome = false
     /// When set (split panes), show a close-split button in the inline header.
     var onClosePane: (() -> Void)? = nil
+    /// Open straight into Book mode (used when arriving from the Books shelf).
+    var openBook = false
+
+    @Environment(ServerController.self) private var server
 
     @State private var detail: PaperDetail?
+    /// The document's body (`sections.md`), read from disk. Shown for non-PDF
+    /// docs (web pages, ideas, reflections) whose content has no PDF to render.
+    @State private var bodyMarkdown: String?
     @State private var related: [SimilarPaper] = []
     @State private var links: [LinkConn] = []
     @State private var sparksFor: [Spark] = []
@@ -24,6 +31,10 @@ struct PaperDetailView: View {
     @State private var toast: String?
     @State private var explain: ExplainRequest?
     @State private var showNotes = false
+    @State private var bookmarked = false
+    /// Book mode shows the generated HTML book (`write-paper-book`) in a WebView.
+    @State private var bookMode = false
+    @State private var bookReload = 0
 
     enum ConnTab: Hashable { case similar, linked, sparks }
     struct LinkConn: Identifiable { let id: String; let title: String }
@@ -32,15 +43,27 @@ struct PaperDetailView: View {
     init(client: KBClient, paperId: String,
          onOpenPaper: @escaping (String, String) -> Void = { _, _ in },
          inlineChrome: Bool = false,
-         onClosePane: (() -> Void)? = nil) {
+         onClosePane: (() -> Void)? = nil,
+         openBook: Bool = false) {
         self.client = client
         self.paperId = paperId
         self.onOpenPaper = onOpenPaper
         self.inlineChrome = inlineChrome
         self.onClosePane = onClosePane
+        self.openBook = openBook
         // Single view shows the PDF beside the paper by default; split panes
         // start as text (toggle per pane) to avoid a cramped 4-column layout.
         _showPDF = State(initialValue: !inlineChrome)
+        // Arriving from the Books shelf jumps straight into the book; the Book
+        // toggle / main-content still guard on the book actually existing on disk.
+        _bookMode = State(initialValue: openBook)
+    }
+
+    /// The book folder for this paper under the corpus root, and its landing page.
+    private var bookDir: URL { PaperBook.bookDir(root: server.kbRoot, id: paperId) }
+    private var bookIndexURL: URL? {
+        let url = PaperBook.indexURL(root: server.kbRoot, id: paperId)
+        return FileManager.default.fileExists(atPath: url.path) ? url : nil
     }
 
     var body: some View {
@@ -83,8 +106,11 @@ struct PaperDetailView: View {
 
     @ViewBuilder private var mainContent: some View {
         if let detail {
-            if readerMode {
-                ReaderView(paperId: paperId, title: detail.metadata.title)
+            if bookMode, let idx = bookIndexURL {
+                BookWebView(url: idx, readAccess: bookDir, reloadToken: bookReload, bookDir: bookDir)
+            } else if readerMode {
+                ReaderView(client: client, paperId: paperId, title: detail.metadata.title,
+                           hasPDF: detail.pdfPath != nil)
             } else if showPDF && detail.pdfPath != nil {
                 // Adjustable-width split: paper on the left, PDF on the right.
                 HSplitView {
@@ -127,23 +153,76 @@ struct PaperDetailView: View {
     /// The action buttons (read aloud, toggle PDF) shared by the window toolbar
     /// and the inline split-pane header.
     @ViewBuilder private func actions(_ detail: PaperDetail) -> some View {
-        ReadAloudButton(text: readableSummary(detail), title: detail.metadata.title)
         Button {
-            withAnimation(.snappy) { readerMode.toggle() }
+            Task { await toggleBookmark() }
         } label: {
-            Label(readerMode ? "Paper" : "Reader",
-                  systemImage: readerMode ? "doc.richtext" : "text.alignleft")
+            Label(bookmarked ? "Bookmarked" : "Bookmark",
+                  systemImage: bookmarked ? "bookmark.fill" : "bookmark")
         }
-        .help(readerMode ? "Back to paper view" : "Reader mode — reflowable text with math")
-        if !readerMode && detail.pdfPath != nil {
+        .help(bookmarked ? "Remove from Bookmarks" : "Add to Bookmarks")
+        ReadAloudButton(text: readableSummary(detail), title: detail.metadata.title)
+        if !bookMode {
             Button {
-                withAnimation(.snappy) { showPDF.toggle() }
+                withAnimation(.snappy) { readerMode.toggle() }
             } label: {
-                Label(showPDF ? "Hide PDF" : "Show PDF",
-                      systemImage: showPDF ? "rectangle.righthalf.inset.filled"
-                                           : "rectangle.righthalf.inset")
+                Label(readerMode ? "Paper" : "Reader",
+                      systemImage: readerMode ? "doc.richtext" : "text.alignleft")
             }
-            .help(showPDF ? "Hide the PDF panel" : "Show the PDF beside the paper")
+            .help(readerMode ? "Back to paper view" : "Reader mode — reflowable text with math")
+            if !readerMode && detail.pdfPath != nil {
+                Button {
+                    withAnimation(.snappy) { showPDF.toggle() }
+                } label: {
+                    Label(showPDF ? "Hide PDF" : "Show PDF",
+                          systemImage: showPDF ? "rectangle.righthalf.inset.filled"
+                                               : "rectangle.righthalf.inset")
+                }
+                .help(showPDF ? "Hide the PDF panel" : "Show the PDF beside the paper")
+            }
+        }
+        bookActions(detail)
+    }
+
+    /// Reading / building the generated HTML book (`write-paper-book`). When a book
+    /// exists on disk, toggle into it; otherwise offer to build one with Claude.
+    @ViewBuilder private func bookActions(_ detail: PaperDetail) -> some View {
+        if bookIndexURL != nil {
+            Button {
+                withAnimation(.snappy) { bookMode.toggle(); if bookMode { readerMode = false } }
+            } label: {
+                Label(bookMode ? "Paper" : "Book",
+                      systemImage: bookMode ? "doc.richtext" : "books.vertical")
+            }
+            .help(bookMode ? "Back to paper view" : "Read the generated HTML book")
+            if bookMode {
+                Button { bookReload += 1 } label: { Label("Reload", systemImage: "arrow.clockwise") }
+                    .help("Reload the book from disk")
+                Button { if let u = bookIndexURL { NSWorkspace.shared.open(u) } } label: {
+                    Label("Open in Browser", systemImage: "safari")
+                }
+                .help("Open the book in your default browser")
+                Button { launchBookBuild(detail) } label: { Label("Rebuild", systemImage: "wand.and.stars") }
+                    .help("Regenerate the book with Claude")
+            }
+        } else {
+            Button { launchBookBuild(detail) } label: { Label("Build Book", systemImage: "books.vertical") }
+                .help("Generate a beautiful HTML book from this paper with Claude")
+        }
+    }
+
+    private func launchBookBuild(_ detail: PaperDetail) {
+        if PaperBook.launchBuild(id: paperId, title: detail.metadata.title) {
+            showToast("Building the book in Terminal — reopen Book when it finishes.")
+        } else {
+            showToast("Couldn't open Terminal to build the book.")
+        }
+    }
+
+    private func showToast(_ message: String) {
+        toast = message
+        Task {
+            try? await Task.sleep(for: .seconds(3))
+            if toast == message { toast = nil }
         }
     }
 
@@ -154,7 +233,13 @@ struct PaperDetailView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
                 headerBlock(detail.metadata)
-                abstractBlock(detail.metadata)
+                // PDF docs show their content in the PDF panel; non-PDF docs
+                // (web pages, ideas, reflections) render their markdown body here.
+                if detail.pdfPath == nil, let body = bodyMarkdown, !body.isEmpty {
+                    contentBlock(body)
+                } else {
+                    abstractBlock(detail.metadata)
+                }
                 notesCard(detail.notes)
                 if !related.isEmpty || !links.isEmpty || !sparksFor.isEmpty { connectionsBlock }
             }
@@ -178,6 +263,18 @@ struct PaperDetailView: View {
                 ForEach(m.categories.prefix(5), id: \.self) { Chip(text: $0) }
                 ForEach(m.tags, id: \.self) { Chip(text: $0, color: .accentColor, filled: true) }
             }
+            // Web pages carry the URL they were ingested from — show it as a
+            // clickable link back to the original source.
+            if let source = m.sourceUrl, let url = URL(string: source) {
+                Link(destination: url) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "globe")
+                        Text(source).lineLimit(1).truncationMode(.middle)
+                    }
+                    .font(.callout)
+                }
+                .help("Open the original page — \(source)")
+            }
         }
     }
 
@@ -187,6 +284,16 @@ struct PaperDetailView: View {
             Text(m.abstract.isEmpty ? "No abstract." : m.abstract)
                 .font(.system(.body, design: .serif))
                 .lineSpacing(4)
+                .textSelection(.enabled)
+        }
+    }
+
+    /// The full markdown body for docs with no PDF (web pages, ideas,
+    /// reflections). Rendered with the native markdown renderer.
+    private func contentBlock(_ markdown: String) -> some View {
+        SectionBox(title: "Content", systemImage: "doc.plaintext") {
+            MarkdownText(markdown: markdown)
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .textSelection(.enabled)
         }
     }
@@ -316,6 +423,11 @@ struct PaperDetailView: View {
         async let g = try? await client.graph(neighbors: 0)   // explicit links only
         async let s = try? await client.sparks(limit: 200)
         detail = await d
+        bookmarked = (await d)?.bookmarked ?? false
+        // The body lives in `<kbRoot>/<id>/sections.md` (same disk-read pattern
+        // as ReaderView's reader.md). Shown when there's no PDF to render.
+        let sections = server.kbRoot.appendingPathComponent(paperId).appendingPathComponent("sections.md")
+        bodyMarkdown = try? String(contentsOf: sections, encoding: .utf8)
         related = (await r)?.papers ?? []
         links = linkNeighbors(await g)
         sparksFor = (await s)?.sparks.filter { $0.src.paperId == paperId || $0.dst.paperId == paperId } ?? []
@@ -356,6 +468,21 @@ struct PaperDetailView: View {
             } catch {
                 await flashToast("Couldn't add note")
             }
+        }
+    }
+
+    /// Toggle the bookmark. Flips the icon optimistically, then reverts on
+    /// failure so the toolbar always reflects the persisted state.
+    private func toggleBookmark() async {
+        let target = !bookmarked
+        bookmarked = target
+        do {
+            if target { try await client.addBookmark(paperId) }
+            else { try await client.removeBookmark(paperId) }
+            await flashToast(target ? "Added to Bookmarks" : "Removed from Bookmarks")
+        } catch {
+            bookmarked = !target
+            await flashToast("Couldn't update bookmark")
         }
     }
 

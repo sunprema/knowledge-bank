@@ -114,8 +114,10 @@ const DEFAULT_BACKOFF_MS: [u64; 3] = [1000, 2000, 4000];
 /// Anthropic API version header value (the documented, stable version).
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 
-/// Per-turn output cap. Roundtable turns are a few paragraphs; this keeps
-/// latency and cost bounded while leaving room for the synthesis.
+/// Default per-turn output cap. Roundtable turns are a few paragraphs; this keeps
+/// latency and cost bounded while leaving room for the synthesis. Paths that
+/// need a larger budget (e.g. the Clean Read rewrite) raise it per-instance via
+/// [`with_max_tokens`](AnthropicChat::with_max_tokens).
 const MAX_TOKENS: u32 = 2048;
 
 pub struct AnthropicChat {
@@ -125,6 +127,8 @@ pub struct AnthropicChat {
     /// e.g. "https://api.anthropic.com/v1" — overridable for tests.
     base_url: String,
     backoff_ms: [u64; 3],
+    /// Output token cap sent as `max_tokens`. Defaults to [`MAX_TOKENS`].
+    max_tokens: u32,
 }
 
 impl std::fmt::Debug for AnthropicChat {
@@ -183,7 +187,17 @@ impl AnthropicChat {
             model: model.to_string(),
             base_url: base_url.trim_end_matches('/').to_string(),
             backoff_ms: DEFAULT_BACKOFF_MS,
+            max_tokens: MAX_TOKENS,
         }
+    }
+
+    /// Raise (or lower) the output token cap for this client. Used by longer-form
+    /// paths like the Clean Read rewrite, where 2048 would truncate the output;
+    /// leaves the shared default untouched so roundtable/chat budgets don't move.
+    #[must_use]
+    pub fn with_max_tokens(mut self, n: u32) -> Self {
+        self.max_tokens = n;
+        self
     }
 
     #[cfg(test)]
@@ -218,7 +232,7 @@ impl AnthropicChat {
 
         let mut body = serde_json::json!({
             "model": self.model,
-            "max_tokens": MAX_TOKENS,
+            "max_tokens": self.max_tokens,
             "messages": turns,
         });
         if !system.is_empty() {
@@ -261,7 +275,7 @@ impl AnthropicChat {
 
         let mut body = serde_json::json!({
             "model": self.model,
-            "max_tokens": MAX_TOKENS,
+            "max_tokens": self.max_tokens,
             "messages": turns,
             "stream": true,
         });
@@ -372,7 +386,7 @@ impl AnthropicChat {
     ) -> Result<(Vec<ContentBlock>, String), KbError> {
         let mut body = serde_json::json!({
             "model": self.model,
-            "max_tokens": MAX_TOKENS,
+            "max_tokens": self.max_tokens,
             "messages": messages,
         });
         if !system.is_empty() {

@@ -90,7 +90,7 @@ struct MainView: View {
     let client: KBClient
     @Environment(SpeechController.self) private var speech
     @Environment(ServerController.self) private var server
-    @State private var section: AppSection = .search
+    @State private var section: AppSection = .brief
     @State private var showKeyOnboarding = false
     /// Set by the Problems view to seed a roundtable objective; consumed (and
     /// cleared) by the Roundtable view on appear.
@@ -106,6 +106,12 @@ struct MainView: View {
         } detail: {
             Group {
                 switch section {
+                case .brief:
+                    BriefView(client: client, onOpenPaper: { id, title in
+                        libraryOpen = LibraryOpen(id: id, title: title)
+                        section = .library
+                    }, onManageWatches: { section = .watches })
+                case .watches: WatchesView(client: client)
                 case .search:  SearchView(client: client)
                 case .add:
                     AddView(client: client, onOpen: { result in
@@ -113,11 +119,26 @@ struct MainView: View {
                         section = .library
                     })
                 case .library: LibraryView(client: client, openRequest: $libraryOpen)
+                case .books:
+                    BooksView(client: client, onOpenBook: { id, title in
+                        libraryOpen = LibraryOpen(id: id, title: title, showBook: true)
+                        section = .library
+                    })
+                case .bookmarks:
+                    BookmarksView(client: client, onOpenPaper: { id, title in
+                        libraryOpen = LibraryOpen(id: id, title: title)
+                        section = .library
+                    })
+                case .notes:   NotesView(client: client)
                 case .graph:   GraphView(client: client)
                 case .chat:    ChatView(client: client)
                 case .explore: ExploreView(client: client)
                 case .personas: PersonasView()
-                case .sparks:  SparksView(client: client)
+                case .sparks:
+                    SparksView(client: client, onOpenPaper: { id, title in
+                        libraryOpen = LibraryOpen(id: id, title: title)
+                        section = .library
+                    })
                 case .problems:
                     ProblemsView(client: client, onBrainstorm: { objective in
                         roundtableSeed = objective
@@ -146,13 +167,18 @@ struct MainView: View {
 }
 
 enum AppSection: String, CaseIterable, Identifiable {
-    case search, add, library, graph, chat, explore, personas, sparks, problems, roundtable
+    case brief, search, add, library, books, bookmarks, notes, graph, chat, explore, personas, sparks, problems, roundtable, watches
     var id: String { rawValue }
     var title: String {
         switch self {
+        case .brief: "Brief"
+        case .watches: "Watches"
         case .search: "Search"
         case .add: "Add"
         case .library: "Library"
+        case .books: "Books"
+        case .bookmarks: "Bookmarks"
+        case .notes: "Notes"
         case .graph: "Graph"
         case .chat: "Chat"
         case .explore: "Explore"
@@ -164,9 +190,14 @@ enum AppSection: String, CaseIterable, Identifiable {
     }
     var icon: String {
         switch self {
+        case .brief: "sun.max"
+        case .watches: "binoculars"
         case .search: "magnifyingglass"
         case .add: "plus.circle"
         case .library: "books.vertical"
+        case .books: "book.closed"
+        case .bookmarks: "bookmark"
+        case .notes: "note.text"
         case .graph: "point.3.connected.trianglepath.dotted"
         case .chat: "bubble.left.and.bubble.right"
         case .explore: "point.3.filled.connected.trianglepath.dotted"
@@ -178,9 +209,14 @@ enum AppSection: String, CaseIterable, Identifiable {
     }
     var subtitle: String {
         switch self {
+        case .brief: "New papers, sparks & resurfaced notes"
+        case .watches: "Standing interests that grow the KB"
         case .search: "Find sections across the corpus"
         case .add: "Ingest papers, pages & PDFs"
         case .library: "Browse and read your papers"
+        case .books: "Papers turned into HTML books"
+        case .bookmarks: "Saved reading materials"
+        case .notes: "Write & keep markdown notes"
         case .graph: "Explore connections visually"
         case .chat: "Ask questions over everything"
         case .explore: "Branch & merge a canvas chat"

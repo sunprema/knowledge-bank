@@ -15,8 +15,10 @@ pub mod embed;
 pub mod error;
 pub mod index;
 pub mod ingest;
+pub mod reader;
 pub mod search;
 pub mod server;
+pub mod watch;
 pub mod watcher;
 
 pub use error::KbError;

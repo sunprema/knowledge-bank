@@ -227,6 +227,18 @@ private struct AddedCard: View {
                             Chip(text: doc.sourceFormat.uppercased(), color: .accentColor, filled: true)
                             Text("\(doc.chunks) sections").font(.caption).foregroundStyle(.tertiary)
                         }
+                        // Web-page adds carry the source URL — show it as a link
+                        // back to the original page.
+                        if let source = doc.sourceUrl, let url = URL(string: source) {
+                            Link(destination: url) {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "globe")
+                                    Text(source).lineLimit(1).truncationMode(.middle)
+                                }
+                                .font(.caption)
+                            }
+                            .help("Open the original page — \(source)")
+                        }
                     }
                     Spacer(minLength: 0)
                     Image(systemName: "chevron.right")

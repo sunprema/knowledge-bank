@@ -1,5 +1,7 @@
 /target
-/.claude/
+# Keep local Claude settings out of git, but DO version the project skills.
+/.claude/*
+!/.claude/skills/
 .env*
 .DS_Store
 macos/build/

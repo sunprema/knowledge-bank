@@ -68,6 +68,25 @@ synthesis of technical concepts, use the kb_search tool.
 - Cite both sides as usual: the problem's source paper and each
   candidate solution's paper, with their deep_links
 
+## Catching up (kb_brief)
+
+- Use at the start of a session, or when the user asks "what's new",
+  "anything relevant lately", or wants to triage their reading queue.
+  This is the ambient digest; kb_search is for a specific lookup
+- It returns: new arXiv papers surfaced by the user's standing watches,
+  each scored 0..1 by how strongly it connects to the existing corpus —
+  with the connecting papers/reflections named under why.connections, so
+  you can say WHY a paper matters ("connects to your reflection X and the
+  TurboQuant method"). Also: one resurfaced past reflection, a few fresh
+  sparks, and corpus stats
+- Lead with the highest-scoring papers and explain each via its
+  connections. A why.connects_to_synthesis flag means it links to the
+  user's own notes/reflections — call that out, it's the strongest signal
+- Read-only. To add a surfaced paper to the KB, tell the user to Ingest it
+  from the Brief (or use the HTTP /ingest path); don't claim you ingested it
+- The brief is empty until the user adds watches (an arXiv category,
+  author, or topic) — if so, suggest adding one
+
 ## Output discipline
 
 When citing papers:

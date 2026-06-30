@@ -1,10 +1,18 @@
 import SwiftUI
 
 // Native, interactive knowledge graph (LOCAL_UI_PRD §4.5 / NEW_SWIFT_FEATURES §2).
-// Renders the engine's `/graph` (HippoRAG-style link + similarity edges) with a
-// force-directed layout drawn in a Canvas. Pan by dragging the background, zoom
-// with pinch or the controls, drag a node to reposition it, click a node to
-// inspect and open it.
+// Renders the engine's `/graph` (HippoRAG-style link + similarity edges) as a
+// constellation of book covers: each document is its Library cover (real PDF
+// page or designed gradient), wired to relevant documents by link/similarity
+// edges. The layout is solved instantly (no visible jiggle).
+//
+// Two modes:
+//   • Browse — pan/zoom the whole constellation; hover a cover to light its
+//     neighborhood, double-click to open.
+//   • Focus — single-click a cover: the rest fade away and its connected
+//     documents reflow into a ring around it, bigger and closer, so you can
+//     study one document's neighborhood. Single-click a neighbor to re-focus on
+//     it; double-click any cover to open it; Esc returns to the full graph.
 @MainActor
 struct GraphView: View {
     let client: KBClient
@@ -14,7 +22,7 @@ struct GraphView: View {
     @State private var loading = true
     @State private var error: String?
 
-    // Viewport.
+    // Viewport (browse mode).
     @State private var scale: CGFloat = 1
     @State private var baseScale: CGFloat = 1
     @State private var offset: CGSize = .zero
@@ -22,20 +30,23 @@ struct GraphView: View {
     @State private var viewCenter: CGPoint = .zero
 
     // Interaction.
-    @State private var selected: String?
-    @State private var hovered: Int?
-    @State private var hoverPoint: CGPoint?
-    @State private var drag: DragMode = .none
+    @State private var hovered: String?
+    @State private var focused: String?            // focus mode: the centered node
+    @State private var focusOrder: [String] = []   // its neighbors, in ring order
+    @State private var preview: PaperMetadata?
+    @Namespace private var coverNS
 
-    // Browser-style tabs: the graph canvas is "home"; clicking a node opens that
+    // Browser-style tabs: the graph canvas is "home"; opening a node opens that
     // paper's abstract + PDF as a new tab — the same reading flow as Library.
     @State private var nav = PaperTabs()
 
-    // Connection count per node id — drives sizing, label priority, and the
-    // inspector's "N connections" without rescanning edges each frame.
+    // Connection count per node id — drives cover sizing, label priority, and
+    // the preview's "N connections" without rescanning edges each frame.
     @State private var degree: [String: Int] = [:]
 
-    private enum DragMode: Equatable { case none, pan, node(Int) }
+    // Focus-mode cover sizes (fixed; independent of zoom).
+    private let focusedW: CGFloat = 132
+    private let neighborW: CGFloat = 96
 
     var body: some View {
         VStack(spacing: 0) {
@@ -119,13 +130,16 @@ struct GraphView: View {
         }
         .pickerStyle(.menu)
         .help("How many nearest-neighbor similarity edges to draw per node")
+        .disabled(focused != nil)
 
         Button { applyZoom(factor: 1.25, focal: viewCenter, animated: true) } label: { Image(systemName: "plus.magnifyingglass") }
-            .help("Zoom in")
+            .help("Zoom in").disabled(focused != nil)
         Button { applyZoom(factor: 0.8, focal: viewCenter, animated: true) } label: { Image(systemName: "minus.magnifyingglass") }
-            .help("Zoom out")
-        Button { withAnimation(.snappy) { fitToView() } } label: { Image(systemName: "scope") }
-            .help("Fit graph to view")
+            .help("Zoom out").disabled(focused != nil)
+        Button { focused != nil ? reset() : withAnimation(.snappy) { fitToView() } } label: {
+            Image(systemName: focused != nil ? "arrow.up.left.and.arrow.down.right.circle" : "scope")
+        }
+        .help(focused != nil ? "Back to the full graph (Esc)" : "Fit graph to view")
     }
 
     // MARK: Canvas
@@ -133,126 +147,235 @@ struct GraphView: View {
     private var canvas: some View {
         GeometryReader { geo in
             let center = CGPoint(x: geo.size.width / 2, y: geo.size.height / 2)
-            Canvas { ctx, _ in
-                draw(ctx, center: center)
-            }
-            .background(.background)
-            .contentShape(Rectangle())
-            .gesture(dragGesture(center: center))
-            .gesture(MagnifyGesture()
-                .onChanged { v in
-                    let target = clampScale(baseScale * v.magnification)
-                    applyZoom(factor: target / scale, focal: hoverPoint ?? center)
+            ZStack {
+                // Background carries pan/zoom (covers handle their own hover/tap).
+                Rectangle().fill(Color(nsColor: .windowBackgroundColor))
+                    .contentShape(Rectangle())
+                    .gesture(panGesture)
+                    .gesture(MagnifyGesture()
+                        .onChanged { v in
+                            guard focused == nil else { return }
+                            let target = clampScale(baseScale * v.magnification)
+                            applyZoom(factor: target / scale, focal: viewCenter)
+                        }
+                        .onEnded { _ in baseScale = scale })
+                    .overlay { ScrollZoom { factor, loc in if focused == nil { applyZoom(factor: factor, focal: loc) } } }
+                    .onTapGesture { if focused != nil { reset() } else { withAnimation(.snappy) { hovered = nil } } }
+
+                // Edges (animatable line shapes so they reflow with the covers).
+                ForEach(graph.edges.indices, id: \.self) { i in
+                    let e = graph.edges[i]
+                    EdgeShape(a: nodePoint(graph.nodes[e.a], center: center),
+                              b: nodePoint(graph.nodes[e.b], center: center))
+                        .stroke(edgeColor(e).opacity(edgeOpacity(e)),
+                                style: StrokeStyle(lineWidth: edgeWidth(e), dash: e.kind == "link" ? [] : [4, 3]))
+                        .allowsHitTesting(false)
                 }
-                .onEnded { _ in baseScale = scale })
-            .onContinuousHover { phase in
-                switch phase {
-                case .active(let loc):
-                    hoverPoint = loc
-                    if drag == .none { hovered = nodeIndex(at: loc, center: center) }
-                case .ended:
-                    hovered = nil; hoverPoint = nil
+
+                // Cover nodes.
+                ForEach(graph.nodes) { node in
+                    nodeCover(node, center: center)
                 }
             }
-            .overlay { ScrollZoom { factor, loc in applyZoom(factor: factor, focal: loc) } }
+            .clipped()
             .overlay(alignment: .topLeading) { legend.padding(12) }
-            .overlay(alignment: .topTrailing) { inspector.padding(12) }
-            .overlay(alignment: .topLeading) { hoverTooltip }
             .overlay(alignment: .bottomTrailing) { zoomBadge.padding(12) }
-            .onTapGesture { } // absorb taps so background taps don't propagate oddly
+            .overlay(alignment: .top) { if focused != nil { focusHint } }
+            .overlay { previewOverlay }
+            .onExitCommand { if preview == nil, focused != nil { reset() } }   // Esc → full graph
             .onAppear { viewCenter = center }
             .onChange(of: geo.size) { viewCenter = center }
         }
     }
 
-    private func draw(_ ctx: GraphicsContext, center: CGPoint) {
-        let neighborIds = selectedNeighborIds
-        let hoveredId = hovered.flatMap { graph.nodes.indices.contains($0) ? graph.nodes[$0].id : nil }
-        // A node is a "hub" if it's in the most-connected fraction of the graph;
-        // hubs keep their labels at any zoom so the map always reads as a map.
-        let hubFloor = max(2, hubDegreeFloor)
-        func screen(_ p: CGPoint) -> CGPoint {
-            CGPoint(x: center.x + offset.width + p.x * scale,
-                    y: center.y + offset.height + p.y * scale)
-        }
+    private var focusHint: some View {
+        Text("Focusing connections · click a cover to refocus · double-click to open · Esc to exit")
+            .font(.caption2).foregroundStyle(.secondary)
+            .padding(.horizontal, 10).padding(.vertical, 5)
+            .background(.regularMaterial, in: Capsule())
+            .padding(.top, 10)
+            .transition(.move(edge: .top).combined(with: .opacity))
+    }
 
-        // Edges.
-        for e in graph.edges {
-            let pa = screen(graph.nodes[e.a].pos), pb = screen(graph.nodes[e.b].pos)
-            let endsId = [graph.nodes[e.a].id, graph.nodes[e.b].id]
-            let active = selected == nil && hoveredId == nil
-            let incident = endsId.contains(selected ?? "\0") || endsId.contains(hoveredId ?? "\0")
-            var path = Path(); path.move(to: pa); path.addLine(to: pb)
-            let isLink = e.kind == "link"
-            let color: Color = isLink ? .accentColor : .gray
-            let baseOpacity = isLink ? 0.55 : 0.30
-            let opacity = (active || incident) ? baseOpacity : 0.05
-            let width = (isLink ? 1.4 : 0.6 + e.weight * 1.2) * (incident ? 1.6 : 1)
-            ctx.stroke(path, with: .color(color.opacity(opacity)),
-                       style: StrokeStyle(lineWidth: width, dash: isLink ? [] : [4, 3]))
-        }
+    private func screen(_ p: CGPoint, center: CGPoint) -> CGPoint {
+        CGPoint(x: center.x + offset.width + p.x * scale,
+                y: center.y + offset.height + p.y * scale)
+    }
 
-        // Nodes.
-        for node in graph.nodes {
-            let p = screen(node.pos)
-            let r = radius(node) * max(scale, 0.6)
-            let isSel = node.id == selected
-            let isHover = node.id == hoveredId
-            let neutral = selected == nil
-            let highlighted = neutral || isSel || neighborIds.contains(node.id)
-            let fill = Theme.kindColor(node.kind)
-            let rect = CGRect(x: p.x - r, y: p.y - r, width: r * 2, height: r * 2)
+    // MARK: Cover nodes
 
-            // Soft glow under selected / hovered nodes so they pop.
-            if isSel || isHover {
-                ctx.fill(Circle().path(in: rect.insetBy(dx: -6, dy: -6)),
-                         with: .color(fill.opacity(0.25)))
+    private func nodeCover(_ node: ForceGraph.Node, center: CGPoint) -> some View {
+        let w = nodeWidth(node)
+        let h = w * 4 / 3
+        let isHover = hovered == node.id
+        let isFocused = focused == node.id
+
+        return VStack(spacing: 4) {
+            ZStack {
+                if preview?.id == node.id {
+                    Color.clear.frame(width: w, height: h)   // held by the expanded preview
+                } else {
+                    CoverImage(paper: meta(node), client: client)
+                        .frame(width: w, height: h)
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(.black.opacity(0.18), lineWidth: 0.5))
+                        .shadow(color: .black.opacity(isHover || isFocused ? 0.4 : 0.22),
+                                radius: isHover || isFocused ? 14 : 5, x: 0, y: isHover || isFocused ? 9 : 3)
+                        .matchedGeometryEffect(id: node.id, in: coverNS)
+                        .scaleEffect(isHover ? 1.1 : 1, anchor: .center)
+                        .onHover { inside in
+                            withAnimation(.snappy(duration: 0.18)) {
+                                hovered = inside ? node.id : (hovered == node.id ? nil : hovered)
+                            }
+                        }
+                        .onTapGesture(count: 2) {
+                            withAnimation(.spring(response: 0.42, dampingFraction: 0.82)) { preview = meta(node) }
+                        }
+                        .onTapGesture(count: 1) { singleTap(node) }
+                }
             }
-            ctx.fill(Circle().path(in: rect),
-                     with: .color(fill.opacity(highlighted ? 1 : 0.22)))
-            // Thin rim for definition against the background.
-            ctx.stroke(Circle().path(in: rect),
-                       with: .color(.black.opacity(highlighted ? 0.25 : 0.08)), lineWidth: 0.75)
-            if isSel || isHover {
-                ctx.stroke(Circle().path(in: rect.insetBy(dx: -3, dy: -3)),
-                           with: .color(isSel ? .primary : .secondary), lineWidth: 2)
-            }
+            .frame(width: w, height: h)
 
-            // Labels: selected node, its neighbors, hubs, the hovered node, or
-            // — once zoomed in a little — everything.
-            let deg = degree[node.id] ?? 0
-            let showLabel = isSel || isHover || neighborIds.contains(node.id)
-                || deg >= hubFloor || scale > 1.1
-            if showLabel && highlighted {
-                let weight: Font.Weight = (isSel || isHover) ? .semibold : .regular
-                let label = Text(String(node.title.prefix(40)))
-                    .font(.system(size: 10, weight: weight))
-                    .foregroundStyle(.primary)
-                // Plate behind the text so it stays legible over edges/nodes.
-                let resolved = ctx.resolve(label)
-                let size = resolved.measure(in: CGSize(width: 240, height: 40))
-                let ly = p.y + r + 4
-                let plate = CGRect(x: p.x - size.width / 2 - 3, y: ly - 1,
-                                   width: size.width + 6, height: size.height + 2)
-                ctx.fill(RoundedRectangle(cornerRadius: 4).path(in: plate),
-                         with: .color(Color(nsColor: .windowBackgroundColor).opacity(0.7)))
-                ctx.draw(resolved, at: CGPoint(x: p.x, y: ly), anchor: .top)
+            if labelShown(node, isHover: isHover) {
+                Text(node.title)
+                    .font(.system(size: isFocused ? 11 : 10, weight: isHover || isFocused ? .semibold : .regular))
+                    .lineLimit(2)
+                    .multilineTextAlignment(.center)
+                    .frame(width: max(w + 24, 96))
+                    .padding(.horizontal, 4).padding(.vertical, 1)
+                    .background(Color(nsColor: .windowBackgroundColor).opacity(0.72),
+                                in: RoundedRectangle(cornerRadius: 4))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .opacity(nodeOpacity(node, isHover: isHover))
+        .zIndex(isHover ? 3 : (isFocused ? 2 : 0))
+        .allowsHitTesting(isVisible(node))
+        .position(nodePoint(node, center: center))
+    }
+
+    private func meta(_ node: ForceGraph.Node) -> PaperMetadata {
+        PaperMetadata(id: node.id, kind: node.kind, title: node.title, tags: node.tags)
+    }
+
+    /// Click → focus this node's neighborhood (or, on the already-focused node,
+    /// return to the full graph). Double-click opens the paper (handled above).
+    private func singleTap(_ node: ForceGraph.Node) {
+        if focused == node.id { reset(); return }
+        focusOrder = orderedNeighbors(of: node.id)
+        withAnimation(.spring(response: 0.5, dampingFraction: 0.82)) {
+            focused = node.id
+            hovered = nil
+        }
+    }
+
+    private func reset() {
+        withAnimation(.spring(response: 0.5, dampingFraction: 0.85)) {
+            focused = nil
+            hovered = nil
+        }
+    }
+
+    // MARK: Node geometry (shared by covers + edges so they move together)
+
+    private func nodePoint(_ node: ForceGraph.Node, center: CGPoint) -> CGPoint {
+        guard let f = focused else { return screen(node.pos, center: center) }
+        if node.id == f { return center }
+        if let i = focusOrder.firstIndex(of: node.id) {
+            return ringPoint(index: i, count: focusOrder.count, center: center)
+        }
+        return screen(node.pos, center: center)   // hidden; position doesn't matter
+    }
+
+    private func ringPoint(index: Int, count: Int, center: CGPoint) -> CGPoint {
+        let r = focusRingRadius(count)
+        let angle = -CGFloat.pi / 2 + 2 * .pi * CGFloat(index) / CGFloat(max(count, 1))
+        return CGPoint(x: center.x + cos(angle) * r, y: center.y + sin(angle) * r)
+    }
+
+    /// Ring radius that clears the centered cover and spaces neighbors apart.
+    private func focusRingRadius(_ count: Int) -> CGFloat {
+        let clearance = focusedW * 4 / 3 / 2 + neighborW * 4 / 3 / 2 + 40
+        let spread = count > 0 ? CGFloat(count) * (neighborW + 30) / (2 * .pi) : 0
+        return max(clearance, spread)
+    }
+
+    private func nodeWidth(_ node: ForceGraph.Node) -> CGFloat {
+        guard let f = focused else { return coverWidth(node) }
+        if node.id == f { return focusedW }
+        if focusOrder.contains(node.id) { return neighborW }
+        return coverWidth(node)
+    }
+
+    private func isVisible(_ node: ForceGraph.Node) -> Bool {
+        guard let f = focused else { return true }
+        return node.id == f || focusOrder.contains(node.id)
+    }
+
+    private func nodeOpacity(_ node: ForceGraph.Node, isHover: Bool) -> Double {
+        if focused != nil { return isVisible(node) ? 1 : 0 }
+        return (hovered == nil || isHover || hoverNeighbors.contains(node.id)) ? 1 : 0.22
+    }
+
+    private func labelShown(_ node: ForceGraph.Node, isHover: Bool) -> Bool {
+        if focused != nil { return isVisible(node) }
+        return isHover || (degree[node.id] ?? 0) >= hubFloor || scale > 1.25
+    }
+
+    // MARK: Edges
+
+    private func edgeColor(_ e: ForceGraph.Edge) -> Color { e.kind == "link" ? .accentColor : .gray }
+
+    private func edgeOpacity(_ e: ForceGraph.Edge) -> Double {
+        let isLink = e.kind == "link"
+        if focused != nil {
+            let visible = isVisible(graph.nodes[e.a]) && isVisible(graph.nodes[e.b])
+            return visible ? (isLink ? 0.6 : 0.4) : 0
+        }
+        let aId = graph.nodes[e.a].id, bId = graph.nodes[e.b].id
+        let incident = hovered != nil && (aId == hovered || bId == hovered)
+        let active = hovered == nil
+        let base = isLink ? 0.55 : 0.28
+        return (active || incident) ? base : 0.05
+    }
+
+    private func edgeWidth(_ e: ForceGraph.Edge) -> CGFloat {
+        let base = e.kind == "link" ? 1.4 : 0.6 + e.weight * 1.2
+        let incident = focused == nil && hovered != nil
+            && (graph.nodes[e.a].id == hovered || graph.nodes[e.b].id == hovered)
+        return CGFloat(base) * (incident ? 1.8 : 1)
+    }
+
+    // MARK: Preview overlay (cover → book detail morph)
+
+    @ViewBuilder private var previewOverlay: some View {
+        if let p = preview {
+            ZStack {
+                Rectangle().fill(.black.opacity(0.4)).ignoresSafeArea()
+                    .transition(.opacity)
+                    .onTapGesture(perform: closePreview)
+                GraphPreviewCard(paper: p, client: client, ns: coverNS,
+                                 connections: degree[p.id] ?? 0,
+                                 onRead: { openFromPreview(p) },
+                                 onClose: closePreview)
             }
         }
     }
 
-    // MARK: Legend & inspector
+    private func closePreview() {
+        withAnimation(.spring(response: 0.42, dampingFraction: 0.85)) { preview = nil }
+    }
+
+    private func openFromPreview(_ paper: PaperMetadata) {
+        let id = paper.arxivId, title = paper.title
+        withAnimation(.spring(response: 0.4, dampingFraction: 0.85)) { preview = nil }
+        nav.open(id, title: title)
+    }
+
+    // MARK: Legend
 
     private var legend: some View {
         VStack(alignment: .leading, spacing: 6) {
-            // What the ball colors mean — only the kinds actually present.
-            ForEach(presentKinds, id: \.self) { kind in
-                HStack(spacing: 6) {
-                    Circle().fill(Theme.kindColor(kind)).frame(width: 9, height: 9)
-                    Text(kind.capitalized).font(.caption2).foregroundStyle(.secondary)
-                }
-            }
-            if !presentKinds.isEmpty { Divider().frame(width: 90) }
             HStack(spacing: 6) {
                 Rectangle().fill(Color.accentColor).frame(width: 16, height: 2)
                 Text("explicit link").font(.caption2).foregroundStyle(.secondary)
@@ -269,151 +392,48 @@ struct GraphView: View {
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
     }
 
-    private var presentKinds: [String] {
-        let order = ["paper", "note", "idea", "reflection"]
-        let present = Set(graph.nodes.map { $0.kind.lowercased() })
-        return order.filter(present.contains)
-    }
-
-    /// A lightweight tooltip that follows the cursor so you can read a node
-    /// without clicking — shows title, kind, and connection count.
-    @ViewBuilder private var hoverTooltip: some View {
-        if let i = hovered, graph.nodes.indices.contains(i), let pt = hoverPoint,
-           graph.nodes[i].id != selected {
-            let node = graph.nodes[i]
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 5) {
-                    Image(systemName: Theme.kindGlyph(node.kind))
-                        .font(.caption2).foregroundStyle(Theme.kindColor(node.kind))
-                    Text(node.kind.capitalized).font(.caption2.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                }
-                Text(node.title).font(.caption).lineLimit(2)
-                Text("\(degree[node.id] ?? 0) connections")
-                    .font(.caption2).foregroundStyle(.tertiary)
-            }
-            .padding(8)
-            .frame(maxWidth: 240, alignment: .leading)
-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
-            .overlay(RoundedRectangle(cornerRadius: 8).stroke(.separator, lineWidth: 0.5))
-            .offset(x: pt.x + 14, y: pt.y + 14)
-            .allowsHitTesting(false)
-        }
-    }
-
     private var zoomBadge: some View {
-        Text("\(Int((scale * 100).rounded()))%")
+        Text(focused == nil ? "\(Int((scale * 100).rounded()))%" : "Focus")
             .font(.caption2.monospacedDigit())
             .foregroundStyle(.secondary)
             .padding(.horizontal, 7).padding(.vertical, 3)
             .background(.regularMaterial, in: Capsule())
     }
 
-    @ViewBuilder private var inspector: some View {
-        if let id = selected, let node = graph.nodes.first(where: { $0.id == id }) {
-            VStack(alignment: .leading, spacing: 10) {
-                HStack {
-                    Image(systemName: Theme.kindGlyph(node.kind)).foregroundStyle(Theme.kindColor(node.kind))
-                    Text(node.kind.capitalized).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-                    Spacer()
-                    Button { selected = nil } label: { Image(systemName: "xmark.circle.fill") }
-                        .buttonStyle(.borderless).foregroundStyle(.secondary)
-                }
-                Text(node.title).font(.headline).lineLimit(4)
-                HStack(spacing: 6) {
-                    Chip(text: "\(node.chunks) chunks")
-                    ForEach(node.tags.prefix(3), id: \.self) { Chip(text: $0, color: .accentColor, filled: true) }
-                }
-                Text("\(connectionCount(of: id)) connections").font(.caption).foregroundStyle(.tertiary)
-                Button {
-                    withAnimation(.snappy) { nav.open(node.id, title: node.title) }
-                } label: { Label("Open Paper", systemImage: "arrow.up.forward.square") }
-                    .buttonStyle(.borderedProminent)
-            }
-            .padding(12)
-            .frame(width: 280, alignment: .leading)
-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
-            .overlay(RoundedRectangle(cornerRadius: 12).stroke(.separator, lineWidth: 0.5))
-            .transition(.move(edge: .trailing).combined(with: .opacity))
-        }
-    }
-
     // MARK: Interaction
 
-    private func dragGesture(center: CGPoint) -> some Gesture {
-        DragGesture(minimumDistance: 0)
+    /// Pan the viewport by dragging the background (browse mode only).
+    private var panGesture: some Gesture {
+        DragGesture(minimumDistance: 3)
             .onChanged { value in
-                switch drag {
-                case .none:
-                    if let hit = nodeIndex(at: value.startLocation, center: center) {
-                        drag = .node(hit)
-                        graph.pin(hit, true)
-                    } else {
-                        drag = .pan
-                        baseOffset = offset
-                    }
-                case .pan:
-                    offset = CGSize(width: baseOffset.width + value.translation.width,
-                                    height: baseOffset.height + value.translation.height)
-                case .node(let i):
-                    let model = CGPoint(x: (value.location.x - center.x - offset.width) / scale,
-                                        y: (value.location.y - center.y - offset.height) / scale)
-                    graph.setPosition(i, to: model)
-                }
+                guard focused == nil else { return }
+                offset = CGSize(width: baseOffset.width + value.translation.width,
+                                height: baseOffset.height + value.translation.height)
             }
-            .onEnded { value in
-                let moved = abs(value.translation.width) + abs(value.translation.height) > 4
-                switch drag {
-                case .node(let i):
-                    graph.pin(i, false)
-                    if moved { graph.reheat() } else {
-                        // Tap → keep it selected (so its neighborhood stays lit
-                        // on return) and open it in a tab, like a Library click.
-                        let node = graph.nodes[i]
-                        selected = node.id
-                        withAnimation(.snappy) { nav.open(node.id, title: node.title) }
-                    }
-                case .pan:
-                    if !moved { withAnimation(.snappy) { selected = nil } }        // tap on background
-                case .none:
-                    break
-                }
-                drag = .none
-            }
+            .onEnded { _ in baseOffset = offset }
     }
 
-    private func nodeIndex(at location: CGPoint, center: CGPoint) -> Int? {
-        let model = CGPoint(x: (location.x - center.x - offset.width) / scale,
-                            y: (location.y - center.y - offset.height) / scale)
-        var best: (Int, CGFloat)?
-        for (i, node) in graph.nodes.enumerated() {
-            let dx = node.pos.x - model.x, dy = node.pos.y - model.y
-            let d = sqrt(dx * dx + dy * dy)
-            let hitR = radius(node) + 6 / scale
-            if d <= hitR, best == nil || d < best!.1 { best = (i, d) }
-        }
-        return best?.0
-    }
+    // MARK: Sizing helpers
 
-    /// Node radius in model space: base size from chunk count, plus a bump for
-    /// well-connected nodes so hubs visually stand out.
-    private func radius(_ node: ForceGraph.Node) -> CGFloat {
-        let base = graph.radius(node)
+    /// Cover width in browse mode: a base size bumped for well-connected hubs,
+    /// scaled by zoom and clamped so covers stay recognizable at any zoom.
+    private func coverWidth(_ node: ForceGraph.Node) -> CGFloat {
         let deg = CGFloat(degree[node.id] ?? 0)
-        return base + min(8, sqrt(deg) * 1.6)
+        let base = 64 + min(24, sqrt(deg) * 4.4)
+        return min(max(base * scale, 30), 150)
     }
 
-    /// Degree threshold above which a node is treated as a hub (always labeled).
-    /// Roughly the 70th percentile, with a sane floor.
-    private var hubDegreeFloor: Int {
+    /// Degree threshold above which a node is a hub (label always shown).
+    private var hubFloor: Int {
         let degs = degree.values.sorted()
         guard !degs.isEmpty else { return .max }
         let idx = Int(Double(degs.count - 1) * 0.7)
         return max(3, degs[idx])
     }
 
-    private var selectedNeighborIds: Set<String> {
-        guard let id = selected,
+    /// Ids adjacent to the hovered node (lit in browse mode; others dim).
+    private var hoverNeighbors: Set<String> {
+        guard let id = hovered,
               let idx = graph.nodes.firstIndex(where: { $0.id == id }) else { return [] }
         var ids = Set<String>()
         for e in graph.edges {
@@ -423,7 +443,20 @@ struct GraphView: View {
         return ids
     }
 
-    private func connectionCount(of id: String) -> Int { degree[id] ?? 0 }
+    /// A focused node's neighbors, strongest connection first (explicit links
+    /// before similarity), for a stable, meaningful ring order.
+    private func orderedNeighbors(of id: String) -> [String] {
+        guard let idx = graph.nodes.firstIndex(where: { $0.id == id }) else { return [] }
+        var best: [String: Double] = [:]
+        for e in graph.edges {
+            let other: Int?
+            if e.a == idx { other = e.b } else if e.b == idx { other = e.a } else { other = nil }
+            guard let o = other else { continue }
+            let rank = e.weight + (e.kind == "link" ? 100 : 0)   // links sort first
+            best[graph.nodes[o].id] = max(best[graph.nodes[o].id] ?? -1, rank)
+        }
+        return best.sorted { $0.value > $1.value }.map { $0.key }
+    }
 
     // MARK: Viewport math
 
@@ -457,7 +490,7 @@ struct GraphView: View {
             minY = min(minY, n.pos.y); maxY = max(maxY, n.pos.y)
         }
         let w = max(maxX - minX, 1), h = max(maxY - minY, 1)
-        let fit = min((viewCenter.x * 2 - 80) / w, (viewCenter.y * 2 - 80) / h)
+        let fit = min((viewCenter.x * 2 - 140) / w, (viewCenter.y * 2 - 140) / h)
         scale = clampScale(fit); baseScale = scale
         let cx = (minX + maxX) / 2, cy = (minY + maxY) / 2
         offset = CGSize(width: -cx * scale, height: -cy * scale)
@@ -474,17 +507,121 @@ struct GraphView: View {
     }
 
     private func load() async {
-        loading = true; error = nil; selected = nil; hovered = nil
+        loading = true; error = nil; hovered = nil; preview = nil; focused = nil
         do {
             let resp = try await client.graph(neighbors: neighbors)
             graph.load(resp)
             recomputeDegree()
-            resetViewport()
-            graph.settle()
+            graph.settleNow()      // solve instantly — no visible settling
+            fitToView()
         } catch {
             self.error = error.localizedDescription
         }
         loading = false
+    }
+}
+
+// An animatable straight edge between two points, so edges interpolate smoothly
+// as covers reflow between browse and focus layouts.
+private struct EdgeShape: Shape {
+    var a: CGPoint
+    var b: CGPoint
+
+    var animatableData: AnimatablePair<AnimatablePair<CGFloat, CGFloat>, AnimatablePair<CGFloat, CGFloat>> {
+        get { .init(.init(a.x, a.y), .init(b.x, b.y)) }
+        set {
+            a = CGPoint(x: newValue.first.first, y: newValue.first.second)
+            b = CGPoint(x: newValue.second.first, y: newValue.second.second)
+        }
+    }
+
+    func path(in rect: CGRect) -> Path {
+        Path { p in p.move(to: a); p.addLine(to: b) }
+    }
+}
+
+// The expanded "book detail" for a graph node: the cover morphs out of the
+// constellation (matched geometry) while authors + abstract are fetched and
+// faded in beside it. Mirrors the Library shelf's preview card.
+private struct GraphPreviewCard: View {
+    let paper: PaperMetadata
+    let client: KBClient
+    let ns: Namespace.ID
+    let connections: Int
+    let onRead: () -> Void
+    let onClose: () -> Void
+
+    @State private var detail: PaperDetail?
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 28) {
+            CoverImage(paper: paper, client: client)
+                .frame(width: 240, height: 320)
+                .clipShape(RoundedRectangle(cornerRadius: 14))
+                .overlay(RoundedRectangle(cornerRadius: 14).stroke(.black.opacity(0.15), lineWidth: 0.5))
+                .shadow(color: .black.opacity(0.4), radius: 24, y: 12)
+                .matchedGeometryEffect(id: paper.id, in: ns)
+
+            VStack(alignment: .leading, spacing: 14) {
+                Text(paper.title)
+                    .font(.system(.title, design: .serif).weight(.bold))
+                    .lineLimit(4)
+
+                let authors = detail?.metadata.authors ?? []
+                if !authors.isEmpty {
+                    Text(authors.prefix(6).joined(separator: ", ")
+                         + (authors.count > 6 ? " et al." : ""))
+                        .font(.title3).foregroundStyle(.secondary).lineLimit(2)
+                }
+
+                HStack(spacing: 6) {
+                    Chip(text: paper.kind.capitalized, color: .accentColor, filled: true)
+                    let pub = detail?.metadata.publishedAt ?? ""
+                    if !pub.isEmpty { Chip(text: Theme.year(pub)) }
+                    ForEach((detail?.metadata.categories ?? []).prefix(3), id: \.self) { Chip(text: $0) }
+                    ForEach(paper.tags.prefix(3), id: \.self) { Chip(text: $0, color: .accentColor, filled: true) }
+                }
+
+                Label("\(connections) connection\(connections == 1 ? "" : "s")",
+                      systemImage: "point.3.connected.trianglepath.dotted")
+                    .font(.caption).foregroundStyle(.secondary)
+
+                let abstract = detail?.metadata.abstract ?? ""
+                if !abstract.isEmpty {
+                    ScrollView {
+                        Text(abstract)
+                            .font(.system(.body, design: .serif))
+                            .lineSpacing(4)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .frame(maxHeight: 180)
+                } else if detail == nil {
+                    HStack(spacing: 6) {
+                        ProgressView().controlSize(.small)
+                        Text("Loading…").font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+
+                Spacer(minLength: 0)
+                HStack(spacing: 12) {
+                    Button(action: onRead) { Label("Read", systemImage: "book").frame(maxWidth: 150) }
+                        .buttonStyle(.borderedProminent).controlSize(.large)
+                        .keyboardShortcut(.defaultAction)
+                    Button("Close", action: onClose)
+                        .controlSize(.large).keyboardShortcut(.cancelAction)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .transition(.opacity.combined(with: .move(edge: .trailing)))
+        }
+        .padding(32)
+        .frame(maxWidth: 820, maxHeight: 520)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 24))
+        .overlay(RoundedRectangle(cornerRadius: 24).stroke(.separator, lineWidth: 0.5))
+        .shadow(color: .black.opacity(0.3), radius: 40, y: 20)
+        .padding(40)
+        .task(id: paper.id) { detail = try? await client.paper(paper.id) }
     }
 }
 

@@ -111,9 +111,17 @@ fn router(state: Shared) -> Router {
         .route("/papers", get(list_papers))
         .route("/papers/{paper_id}", get(get_paper))
         .route("/papers/{paper_id}/notes", post(add_note).put(put_notes))
+        .route("/papers/{paper_id}/reader", post(generate_reader_stream).get(get_reader))
         .route("/papers/{paper_id}/similar", get(similar))
         .route("/graph", get(graph))
         .route("/sparks", get(sparks))
+        .route("/brief", get(brief))
+        .route("/watches", get(list_watches).post(add_watch))
+        .route("/watches/{watch_id}", axum::routing::delete(remove_watch))
+        .route("/watch/refresh", post(watch_refresh))
+        .route("/watch/candidates/{arxiv_id}/status", post(set_candidate_status))
+        .route("/bookmarks", get(list_bookmarks).post(add_bookmark))
+        .route("/bookmarks/{paper_id}", axum::routing::delete(remove_bookmark))
         .route("/search", post(search))
         .route("/problems", post(problems))
         .route("/chat", post(chat))
@@ -122,6 +130,8 @@ fn router(state: Shared) -> Router {
         .route("/brainstorm/{session_id}/interject", post(interject))
         .route("/ingest", post(ingest))
         .route("/ideas", post(create_idea))
+        .route("/notes", get(list_notes).post(create_note))
+        .route("/notes/{note_id}", get(get_note).put(update_note).delete(delete_note))
         .route("/reflections", post(create_reflection))
         .route("/compose/assist", post(compose_assist))
         .route("/chunks/{chunk_id}", get(get_chunk))
@@ -347,10 +357,19 @@ async fn get_paper(
     }
     let meta = PaperMetadata::load(&meta_path)?;
     let notes = std::fs::read_to_string(state.paths.notes_path(&paper_id)).unwrap_or_default();
+    // Only hand the UI a `pdf_path` when the PDF actually exists. Markdown/HTML
+    // docs (ideas, reflections, web pages) have no `paper.pdf`; returning a
+    // bogus path made the app try to render a PDF and fail with "Couldn't open
+    // the PDF" instead of showing the document's markdown content.
+    let pdf = state.paths.pdf_path(&paper_id);
+    let pdf_path = if pdf.exists() { Some(pdf) } else { None };
+    let bookmarked = MetaDb::open(&state.paths.meta_db_path())?.is_bookmarked(&paper_id)?;
     Ok(Json(json!({
         "metadata": meta,
         "notes": notes,
-        "pdf_path": state.paths.pdf_path(&paper_id),
+        "pdf_path": pdf_path,
+        "has_reader": state.paths.reader_path(&paper_id).exists(),
+        "bookmarked": bookmarked,
     })))
 }
 
@@ -510,6 +529,158 @@ async fn sparks(
     Ok(Json(json!({ "sparks": list })))
 }
 
+// ---- ArXiv Watch + Daily Brief ---------------------------------------------
+
+/// The daily brief: new candidate papers, fresh Sparks, one resurfaced
+/// reflection, and headline stats. Read-only over `meta.db` (no API calls)
+/// except for advancing the resurfacing rotation cursor.
+async fn brief(State(state): State<Shared>) -> Result<Json<crate::watch::Brief>, ApiError> {
+    let paths = state.paths.clone();
+    let b = run_blocking(move || async move {
+        crate::watch::brief(&paths, crate::watch::DEFAULT_BRIEF_PAPERS)
+    })
+    .await?;
+    Ok(Json(b))
+}
+
+async fn list_watches(
+    State(state): State<Shared>,
+) -> Result<Json<Vec<crate::index::Watch>>, ApiError> {
+    let db = MetaDb::open(&state.paths.meta_db_path())?;
+    Ok(Json(db.list_watches()?))
+}
+
+#[derive(Deserialize)]
+struct AddWatchRequest {
+    kind: String,
+    value: String,
+}
+
+async fn add_watch(
+    State(state): State<Shared>,
+    Json(req): Json<AddWatchRequest>,
+) -> Result<Json<Value>, ApiError> {
+    crate::watch::validate_kind(&req.kind)?;
+    let value = req.value.trim().to_string();
+    if value.is_empty() {
+        return Err(KbError::Usage("watch value must not be empty".into()).into());
+    }
+    let db = MetaDb::open(&state.paths.meta_db_path())?;
+    let id = db.add_watch(&req.kind, &value)?;
+    Ok(Json(json!({
+        "id": id,
+        "kind": req.kind,
+        "value": value,
+        "search_query": crate::watch::search_query_for(&req.kind, &value),
+    })))
+}
+
+async fn remove_watch(
+    State(state): State<Shared>,
+    Path(watch_id): Path<i64>,
+) -> Result<Json<Value>, ApiError> {
+    let db = MetaDb::open(&state.paths.meta_db_path())?;
+    if !db.remove_watch(watch_id)? {
+        return Err(KbError::NotFound(format!("no watch #{watch_id}")).into());
+    }
+    Ok(Json(json!({ "removed": watch_id })))
+}
+
+// ---- bookmarks -------------------------------------------------------------
+
+/// Bookmarked documents, most recently bookmarked first. Returns full metadata
+/// (like `/papers`) so the UI can render covers without a second round-trip.
+/// Bookmarks whose document no longer exists are silently skipped.
+async fn list_bookmarks(
+    State(state): State<Shared>,
+) -> Result<Json<Vec<PaperMetadata>>, ApiError> {
+    let db = MetaDb::open(&state.paths.meta_db_path())?;
+    let mut rows = Vec::new();
+    for id in db.list_bookmark_ids()? {
+        match PaperMetadata::load(&state.paths.metadata_path(&id)) {
+            Ok(m) => rows.push(m),
+            Err(e) => tracing::warn!("skipping bookmark {id}: {e}"),
+        }
+    }
+    Ok(Json(rows))
+}
+
+#[derive(Deserialize)]
+struct AddBookmarkRequest {
+    paper_id: String,
+}
+
+async fn add_bookmark(
+    State(state): State<Shared>,
+    Json(req): Json<AddBookmarkRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let paper_id = req.paper_id.trim().to_string();
+    if paper_id.is_empty() {
+        return Err(KbError::Usage("paper_id must not be empty".into()).into());
+    }
+    if !state.paths.metadata_path(&paper_id).exists() {
+        return Err(KbError::NotFound(format!("{paper_id} is not in the KB")).into());
+    }
+    let db = MetaDb::open(&state.paths.meta_db_path())?;
+    let created = db.add_bookmark(&paper_id)?;
+    Ok(Json(json!({ "paper_id": paper_id, "bookmarked": true, "created": created })))
+}
+
+async fn remove_bookmark(
+    State(state): State<Shared>,
+    Path(paper_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let db = MetaDb::open(&state.paths.meta_db_path())?;
+    if !db.remove_bookmark(&paper_id)? {
+        return Err(KbError::NotFound(format!("{paper_id} is not bookmarked")).into());
+    }
+    Ok(Json(json!({ "paper_id": paper_id, "bookmarked": false })))
+}
+
+/// Poll every enabled watch and score new papers against the corpus. Network +
+/// embedding work, so it can take a few seconds; the macOS app calls it on
+/// launch and on a timer.
+async fn watch_refresh(
+    State(state): State<Shared>,
+) -> Result<Json<crate::watch::RefreshSummary>, ApiError> {
+    let paths = state.paths.clone();
+    let config = state.config.clone();
+    let summary = run_blocking(move || async move {
+        crate::watch::refresh(&paths, &config).await
+    })
+    .await?;
+    Ok(Json(summary))
+}
+
+#[derive(Deserialize)]
+struct CandidateStatusRequest {
+    /// 'ingested' | 'dismissed' | 'new'
+    status: String,
+}
+
+/// Mark a candidate paper ingested or dismissed so it leaves the brief's
+/// "new" list. The app calls this after a successful ingest, or on dismiss.
+async fn set_candidate_status(
+    State(state): State<Shared>,
+    Path(arxiv_id): Path<String>,
+    Json(req): Json<CandidateStatusRequest>,
+) -> Result<Json<Value>, ApiError> {
+    const VALID: [&str; 3] = ["new", "ingested", "dismissed"];
+    if !VALID.contains(&req.status.as_str()) {
+        return Err(KbError::Usage(format!(
+            "unknown status {:?}; expected one of: {}",
+            req.status,
+            VALID.join(", ")
+        ))
+        .into());
+    }
+    let db = MetaDb::open(&state.paths.meta_db_path())?;
+    if !db.set_candidate_status(&arxiv_id, &req.status)? {
+        return Err(KbError::NotFound(format!("no candidate {arxiv_id}")).into());
+    }
+    Ok(Json(json!({ "arxiv_id": arxiv_id, "status": req.status })))
+}
+
 #[derive(Deserialize)]
 struct ChatRequest {
     query: String,
@@ -583,6 +754,79 @@ async fn chat_stream(
         let _ = match result {
             Ok(resp) => tx.send(ChatStreamWire::Done { answer: resp.answer }),
             Err(e) => tx.send(ChatStreamWire::Error { message: e.to_string() }),
+        };
+    });
+
+    let stream = UnboundedReceiverStream::new(rx).map(|ev| {
+        Event::default()
+            .json_data(&ev)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+    });
+    Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+/// Return the cached Clean Read (`reader.md`) for a paper, or 404 if it hasn't
+/// been generated yet. `GET /papers/{id}` already exposes `has_reader` so the
+/// client knows whether to fetch this or offer to generate.
+async fn get_reader(
+    State(state): State<Shared>,
+    Path(paper_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    if !state.paths.metadata_path(&paper_id).exists() {
+        return Err(KbError::NotFound(format!("{paper_id} is not in the KB")).into());
+    }
+    let reader = std::fs::read_to_string(state.paths.reader_path(&paper_id))
+        .map_err(|_| KbError::NotFound(format!("{paper_id} has no clean read yet")))?;
+    Ok(Json(json!({ "reader": reader })))
+}
+
+#[derive(Deserialize)]
+struct ReaderRequest {
+    /// Which model generates the rewrite (e.g. `claude-opus-4-8`). Falls back to
+    /// `config.chat.model` when omitted or blank.
+    #[serde(default)]
+    model: Option<String>,
+}
+
+/// One SSE event of a streamed Clean Read generation (`POST /papers/{id}/reader`).
+/// `type`-tagged like [`ChatStreamWire`]: `generating` (started) → `delta`
+/// (rewrite tokens, in order) → `done` (full markdown, also now on disk) — or
+/// `error`.
+#[derive(serde::Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum ReaderStreamWire {
+    Generating,
+    Delta { text: String },
+    Done { reader: String },
+    Error { message: String },
+}
+
+/// Generate (and cache) the Clean Read for a paper, streaming the rewrite live
+/// (SSE). The work runs in a spawned task pushing events over a channel; the
+/// file is written atomically inside `reader::generate_reader`, so by the time
+/// `done` fires `reader.md` exists on disk. A missing provider key or missing
+/// `sections.md` surfaces as an `error` event, not a 500 (mirrors `chat_stream`).
+async fn generate_reader_stream(
+    State(state): State<Shared>,
+    Path(paper_id): Path<String>,
+    Json(req): Json<ReaderRequest>,
+) -> impl IntoResponse {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<ReaderStreamWire>();
+    let st = state.clone();
+    let model = req
+        .model
+        .filter(|m| !m.trim().is_empty())
+        .unwrap_or_else(|| state.config.chat.model.clone());
+    tokio::spawn(async move {
+        let _ = tx.send(ReaderStreamWire::Generating);
+        let sink = tx.clone();
+        let result = crate::reader::generate_reader(&st.paths, &st.config, &paper_id, &model, |d| {
+            let _ = sink.send(ReaderStreamWire::Delta { text: d.to_string() });
+        })
+        .await;
+        let _ = match result {
+            Ok(reader) => tx.send(ReaderStreamWire::Done { reader }),
+            Err(e) => tx.send(ReaderStreamWire::Error { message: e.to_string() }),
         };
     });
 
@@ -702,6 +946,8 @@ enum IngestEvent {
         title: String,
         chunks: usize,
         source_format: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        source_url: Option<String>,
     },
     Error { message: String },
 }
@@ -769,6 +1015,7 @@ async fn ingest(
                         title: report.title,
                         chunks: report.chunks,
                         source_format: source_format.to_string(),
+                        source_url: report.source_url,
                     });
                 }
                 Err(e) => {
@@ -805,6 +1052,160 @@ async fn create_idea(
     })
     .await?;
     Ok(Json(json!({ "ok": true, "id": report.paper_id, "chunks": report.chunks })))
+}
+
+/// One row in the Notes list: enough to render the master list without reading
+/// every note's full body.
+#[derive(serde::Serialize)]
+struct NoteSummary {
+    id: String,
+    title: String,
+    project: String,
+    updated_at: String,
+    /// First ~200 chars of the body, for the list's secondary line.
+    preview: String,
+}
+
+/// List every standalone note (`DocKind::Note`), newest first. Backs the
+/// Notes sidebar section. Notes are the same `idea.md` documents created by
+/// `POST /ideas` / Roundtable syntheses, so they show up here too.
+async fn list_notes(State(state): State<Shared>) -> Result<Json<Vec<NoteSummary>>, ApiError> {
+    let db = MetaDb::open(&state.paths.meta_db_path())?;
+    let mut rows = Vec::new();
+    for id in db.paper_ids_by_kind(DocKind::Note)? {
+        let Ok(meta) = PaperMetadata::load(&state.paths.metadata_path(&id)) else {
+            continue;
+        };
+        let body = std::fs::read_to_string(state.paths.idea_path(&id)).unwrap_or_default();
+        let preview: String = body.trim().chars().take(200).collect();
+        rows.push(NoteSummary {
+            id,
+            title: meta.title,
+            project: meta.project.unwrap_or_else(|| "global".into()),
+            updated_at: meta.updated_at,
+            preview,
+        });
+    }
+    // Newest first by ISO-8601 `updated_at` (lexical sort == chronological).
+    rows.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    Ok(Json(rows))
+}
+
+/// Fetch one note's full markdown body plus its metadata (for the editor).
+async fn get_note(
+    State(state): State<Shared>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let meta_path = state.paths.metadata_path(&id);
+    if !meta_path.exists() {
+        return Err(KbError::NotFound(format!("{id} is not in the KB")).into());
+    }
+    let meta = PaperMetadata::load(&meta_path)?;
+    if meta.kind != DocKind::Note {
+        return Err(KbError::Usage(format!("{id} is not a note")).into());
+    }
+    let body = std::fs::read_to_string(state.paths.idea_path(&id)).unwrap_or_default();
+    Ok(Json(json!({
+        "id": id,
+        "title": meta.title,
+        "project": meta.project.unwrap_or_else(|| "global".into()),
+        "body": body,
+        "tags": meta.tags,
+        "updated_at": meta.updated_at,
+    })))
+}
+
+/// Create (POST `/notes`) or update (PUT `/notes/{id}`) payload. Body and
+/// title are required by the pipeline; empty tags on an update keep existing
+/// ones.
+#[derive(Deserialize)]
+struct NotePayload {
+    title: String,
+    #[serde(default)]
+    body: String,
+    project: Option<String>,
+    #[serde(default)]
+    tags: Vec<String>,
+}
+
+/// Create a new note. The id (slug) is derived from the title; re-using a
+/// title upserts the same note (matching `ingest_idea`'s semantics).
+async fn create_note(
+    State(state): State<Shared>,
+    Json(req): Json<NotePayload>,
+) -> Result<Json<Value>, ApiError> {
+    let paths = state.paths.clone();
+    let config = state.config.clone();
+    let report = run_blocking(move || async move {
+        let spec = pipeline::IdeaSpec {
+            slug: None,
+            project: req.project.unwrap_or_else(|| "global".into()),
+            title: req.title,
+            body: req.body,
+            tags: req.tags,
+            links: Vec::new(),
+        };
+        pipeline::ingest_idea(&paths, &config, &spec, &|_| {}).await
+    })
+    .await?;
+    Ok(Json(json!({ "ok": true, "id": report.paper_id })))
+}
+
+/// Update a note in place. Pinning the slug to the path id keeps the id stable
+/// even when the title changes. Refuses to clobber a non-note document.
+async fn update_note(
+    State(state): State<Shared>,
+    Path(id): Path<String>,
+    Json(req): Json<NotePayload>,
+) -> Result<Json<Value>, ApiError> {
+    let meta_path = state.paths.metadata_path(&id);
+    if meta_path.exists() {
+        let meta = PaperMetadata::load(&meta_path)?;
+        if meta.kind != DocKind::Note {
+            return Err(KbError::Usage(format!("{id} is not a note")).into());
+        }
+    }
+    let paths = state.paths.clone();
+    let config = state.config.clone();
+    let report = run_blocking(move || async move {
+        let spec = pipeline::IdeaSpec {
+            slug: Some(id),
+            project: req.project.unwrap_or_else(|| "global".into()),
+            title: req.title,
+            body: req.body,
+            tags: req.tags,
+            links: Vec::new(),
+        };
+        pipeline::ingest_idea(&paths, &config, &spec, &|_| {}).await
+    })
+    .await?;
+    Ok(Json(json!({ "ok": true, "id": report.paper_id })))
+}
+
+/// Delete a note: wipe its index/db traces, then remove its folder. Guarded so
+/// it can never delete an ingested paper.
+async fn delete_note(
+    State(state): State<Shared>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let meta_path = state.paths.metadata_path(&id);
+    if !meta_path.exists() {
+        return Err(KbError::NotFound(format!("{id} is not in the KB")).into());
+    }
+    let meta = PaperMetadata::load(&meta_path)?;
+    if meta.kind != DocKind::Note {
+        return Err(KbError::Usage(format!("{id} is not a note; refusing to delete")).into());
+    }
+    let paths = state.paths.clone();
+    let config = state.config.clone();
+    run_blocking(move || async move {
+        pipeline::remove_paper_from_stores(&paths, &config, &id)?;
+        std::fs::remove_dir_all(paths.paper_dir(&id))
+            .map_err(|e| KbError::Index(format!("folder delete failed (index already updated): {e}")))?;
+        Ok(())
+    })
+    .await?;
+    Ok(Json(json!({ "ok": true })))
 }
 
 #[derive(Deserialize)]

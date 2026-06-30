@@ -380,6 +380,7 @@ Tools exposed:
 |---|---|
 | `kb_search` | Narrow/wide/filtered semantic search (supports `section_types`, `kind`, `project`) |
 | `kb_find_problems` | Hunt the corpus for unsolved problems (limitations/future_work) paired with nearby method/applications work; tags each `greenfield` vs `synthesis_opportunity` |
+| `kb_brief` | The daily brief: new arXiv papers from your watches (scored by corpus connection, with the connecting work named), a resurfaced reflection, fresh sparks, and stats |
 | `kb_get_paper` | Full metadata + notes for a specific document |
 | `kb_add_note` | Append a note to a paper and re-embed immediately |
 | `kb_capture_idea` | Agent-side twin of `kb idea add` — upserts standalone ideas by project |

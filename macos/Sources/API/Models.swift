@@ -14,6 +14,8 @@ struct IngestResult: Decodable {
     let title: String
     let chunks: Int
     let sourceFormat: String
+    /// Web-page adds only: the page the document was ingested from.
+    var sourceUrl: String? = nil
 }
 
 /// One Server-Sent frame from `POST /ingest`: live status, a final result, or
@@ -24,7 +26,7 @@ enum IngestEvent: Decodable {
     case error(String)
 
     private enum CodingKeys: String, CodingKey {
-        case type, message, id, title, chunks, sourceFormat
+        case type, message, id, title, chunks, sourceFormat, sourceUrl
     }
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -35,7 +37,8 @@ enum IngestEvent: Decodable {
                 id: try c.decode(String.self, forKey: .id),
                 title: try c.decode(String.self, forKey: .title),
                 chunks: try c.decode(Int.self, forKey: .chunks),
-                sourceFormat: try c.decode(String.self, forKey: .sourceFormat)))
+                sourceFormat: try c.decode(String.self, forKey: .sourceFormat),
+                sourceUrl: try? c.decode(String.self, forKey: .sourceUrl)))
         case "error":
             self = .error(try c.decode(String.self, forKey: .message))
         default:   // "progress"
@@ -58,13 +61,32 @@ struct PaperMetadata: Codable, Identifiable, Hashable {
     var updatedAt: String?
     var ingestedAt: String?
     var sourceFormat: String?
+    /// Web pages only (`kb add --url`): the page this was ingested from. `nil`
+    /// for arXiv/PDF. Maps the engine's `source_url` (src/lib.rs).
+    var sourceUrl: String?
     var tags: [String] = []
 
     var id: String { arxivId }
 
     enum CodingKeys: String, CodingKey {
         case arxivId, kind, version, title, authors, abstract
-        case categories, publishedAt, updatedAt, ingestedAt, sourceFormat, tags
+        case categories, publishedAt, updatedAt, ingestedAt, sourceFormat, sourceUrl, tags
+    }
+
+    /// Build a lightweight metadata value from data we already have (e.g. a
+    /// graph node), enough to drive a cover + preview header before the full
+    /// `PaperDetail` (authors, abstract) is fetched.
+    init(id: String, kind: String = "paper", title: String,
+         authors: [String] = [], abstract: String = "",
+         categories: [String] = [], publishedAt: String = "", tags: [String] = []) {
+        self.arxivId = id
+        self.kind = kind
+        self.title = title
+        self.authors = authors
+        self.abstract = abstract
+        self.categories = categories
+        self.publishedAt = publishedAt
+        self.tags = tags
     }
 
     init(from decoder: Decoder) throws {
@@ -80,6 +102,7 @@ struct PaperMetadata: Codable, Identifiable, Hashable {
         updatedAt = try? c.decode(String.self, forKey: .updatedAt)
         ingestedAt = try? c.decode(String.self, forKey: .ingestedAt)
         sourceFormat = try? c.decode(String.self, forKey: .sourceFormat)
+        sourceUrl = try? c.decode(String.self, forKey: .sourceUrl)
         tags = (try? c.decode([String].self, forKey: .tags)) ?? []
     }
 }
@@ -88,6 +111,32 @@ struct PaperDetail: Codable {
     let metadata: PaperMetadata
     var notes: String = ""
     var pdfPath: String?
+    /// Whether a cached Clean Read (`reader.md`) exists for this paper.
+    var hasReader: Bool = false
+    /// Whether the user has bookmarked this document.
+    var bookmarked: Bool = false
+}
+
+// MARK: - Notes
+
+/// A row in the Notes list (`GET /notes`). The body isn't loaded until the
+/// note is opened in the editor — `preview` is the first ~200 chars.
+struct NoteSummary: Codable, Identifiable, Hashable {
+    let id: String
+    var title: String
+    var project: String = "global"
+    var updatedAt: String = ""
+    var preview: String = ""
+}
+
+/// A single note's full content (`GET /notes/{id}`), for the editor.
+struct NoteDetail: Codable, Identifiable {
+    let id: String
+    var title: String
+    var project: String = "global"
+    var body: String = ""
+    var tags: [String] = []
+    var updatedAt: String = ""
 }
 
 // MARK: - Search
@@ -178,6 +227,25 @@ struct ChatStreamWire: Codable {
     var sources: [ChatSource]? = nil
     var text: String? = nil
     var answer: String? = nil
+    var message: String? = nil
+}
+
+// MARK: - Streaming Clean Read (`POST /papers/{id}/reader`)
+
+/// A decoded event from the streaming Clean Read generator (see
+/// `KBClient.readerStream`).
+enum ReaderStreamEvent {
+    case generating              // generation started
+    case delta(String)           // a fragment of the rewrite, in order
+    case done(reader: String)    // final full markdown (also now cached on disk)
+}
+
+/// Wire shape of one `/papers/{id}/reader` SSE event — `type`-tagged, mirroring
+/// `ChatStreamWire`. Decoded then mapped to `ReaderStreamEvent`.
+struct ReaderStreamWire: Codable {
+    let type: String
+    var text: String? = nil
+    var reader: String? = nil
     var message: String? = nil
 }
 
@@ -297,4 +365,96 @@ struct Stats: Codable {
         var chunks: Int = 0
         var papers: Int = 0
     }
+}
+
+// MARK: - ArXiv Watch + Daily Brief
+
+/// A standing interest that grows the corpus (an arXiv category, author, or
+/// free-text query).
+struct Watch: Codable, Identifiable {
+    let id: Int
+    let kind: String
+    let value: String
+    var enabled: Bool = true
+    var createdAt: String = ""
+    var lastRefreshedAt: String?
+}
+
+/// What a `feed refresh` did, returned by `POST /watch/refresh`.
+struct RefreshSummary: Codable {
+    var watchesRefreshed: Int = 0
+    var fetched: Int = 0
+    var newCandidates: Int = 0
+    var errors: [String] = []
+}
+
+/// A candidate paper surfaced by a watch, scored by its connection to the
+/// corpus. `why` carries the connecting papers/reflections behind the score.
+struct WatchCandidate: Codable, Identifiable {
+    let arxivId: String
+    let title: String
+    var abstract: String = ""
+    var authors: [String] = []
+    var categories: [String] = []
+    var publishedAt: String = ""
+    let score: Float
+    var why: CandidateWhy = .init()
+    var status: String = "new"
+
+    var id: String { arxivId }
+}
+
+struct CandidateWhy: Codable {
+    var connections: [Connection] = []
+    var connectsToSynthesis: Bool = false
+
+    struct Connection: Codable, Identifiable {
+        let paperId: String
+        var title: String = ""
+        var kind: String = "paper"
+        var score: Float = 0
+        var sections: [String] = []
+
+        var id: String { paperId }
+    }
+}
+
+/// A past reflection/idea resurfaced in the brief (rotated over time).
+struct Resurfaced: Codable {
+    let paperId: String
+    var kind: String = "reflection"
+    var title: String = ""
+    var snippet: String = ""
+}
+
+struct BriefStats: Codable {
+    var papers: Int = 0
+    var newCandidates: Int = 0
+    var watches: Int = 0
+}
+
+/// One surprising connection teaser in the brief (a lighter shape than the
+/// full Sparks view's `Spark`).
+struct BriefSpark: Codable, Identifiable {
+    let kind: String
+    var surprise: Float = 0
+    let src: End
+    let dst: End
+
+    var id: String { "\(src.paper)→\(dst.paper):\(kind)" }
+
+    struct End: Codable {
+        let paper: String
+        var section: String = ""
+        var snippet: String = ""
+    }
+}
+
+/// The assembled daily brief — the app's landing surface.
+struct Brief: Codable {
+    var generatedAt: String = ""
+    var newPapers: [WatchCandidate] = []
+    var sparks: [BriefSpark] = []
+    var resurfaced: Resurfaced?
+    var stats: BriefStats = .init()
 }
