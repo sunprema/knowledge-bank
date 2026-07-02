@@ -107,7 +107,19 @@ struct PaperDetailView: View {
     @ViewBuilder private var mainContent: some View {
         if let detail {
             if bookMode, let idx = bookIndexURL {
-                BookWebView(url: idx, readAccess: bookDir, reloadToken: bookReload, bookDir: bookDir)
+                if showPDF && detail.pdfPath != nil {
+                    // Adjustable-width split: the PDF on the left, the book on the
+                    // right — mirrors the paper/PDF and Clean-read/PDF layouts.
+                    HSplitView {
+                        pdfPane
+                            .frame(minWidth: 300, idealWidth: 460)
+                        bookPane(idx)
+                            .frame(minWidth: 320)
+                            .layoutPriority(1)
+                    }
+                } else {
+                    bookPane(idx)
+                }
             } else if readerMode {
                 ReaderView(client: client, paperId: paperId, title: detail.metadata.title,
                            hasPDF: detail.pdfPath != nil)
@@ -116,9 +128,7 @@ struct PaperDetailView: View {
                 HSplitView {
                     detailScroll(detail)
                         .frame(minWidth: 320, idealWidth: 460)
-                    PDFPanel(client: client, paperId: paperId,
-                             onAddNote: { text, page in addSelectionAsNote(text, page) },
-                             onExplain: { text in explain = ExplainRequest(text: text) })
+                    pdfPane
                         .frame(minWidth: 300, idealWidth: 520)
                         .layoutPriority(1)
                 }
@@ -128,6 +138,19 @@ struct PaperDetailView: View {
         } else if loading {
             ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+    }
+
+    /// The PDF renderer with the annotation → notes / explain hooks wired up.
+    /// Shared by the paper/PDF split and the Book/PDF split.
+    private var pdfPane: some View {
+        PDFPanel(client: client, paperId: paperId,
+                 onAddNote: { text, page in addSelectionAsNote(text, page) },
+                 onExplain: { text in explain = ExplainRequest(text: text) })
+    }
+
+    /// The generated HTML book in a WebView.
+    private func bookPane(_ idx: URL) -> some View {
+        BookWebView(url: idx, readAccess: bookDir, reloadToken: bookReload, bookDir: bookDir)
     }
 
     private func inlineHeader(_ detail: PaperDetail) -> some View {
@@ -195,6 +218,16 @@ struct PaperDetailView: View {
             }
             .help(bookMode ? "Back to paper view" : "Read the generated HTML book")
             if bookMode {
+                if detail.pdfPath != nil {
+                    Button {
+                        withAnimation(.snappy) { showPDF.toggle() }
+                    } label: {
+                        Label(showPDF ? "Hide PDF" : "Show PDF",
+                              systemImage: showPDF ? "rectangle.righthalf.inset.filled"
+                                                   : "rectangle.righthalf.inset")
+                    }
+                    .help(showPDF ? "Hide the PDF panel" : "Show the PDF beside the book")
+                }
                 Button { bookReload += 1 } label: { Label("Reload", systemImage: "arrow.clockwise") }
                     .help("Reload the book from disk")
                 Button { if let u = bookIndexURL { NSWorkspace.shared.open(u) } } label: {
