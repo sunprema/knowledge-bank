@@ -3,11 +3,13 @@
 A single Rust binary (the `kb` CLI) that turns a folder of arXiv papers into a
 queryable, AI-friendly knowledge base: save a paper in one command,
 search across your corpus semantically, let Claude synthesize across
-papers via MCP, and browse and analyze everything in a local web app —
-with every claim deep-linked back to the source PDF.
+papers via MCP, and browse, read, and analyze everything in a local web app
+or a **native macOS app** — with every claim deep-linked back to the source PDF.
 
-▶ **[Watch the 75-second cinematic demo](https://sunprema.github.io/knowledge-bank/)** —
-served by GitHub Pages from [`docs/`](./docs/index.html).
+Two front ends share one engine: the browser web app served by `kb serve`, and
+**KB.app**, a native SwiftUI client that bundles and manages the engine for you
+and adds a research reader (annotations, Clean Read, read-aloud), multi-agent
+debates, a branching canvas chat, and more. See [the macOS app](#the-macos-app).
 
 Full design: [KB_PROD_REQUIREMENTS.md](./KB_PROD_REQUIREMENTS.md) and
 [KB_PERSISTENCE_ADDENDUM.md](./KB_PERSISTENCE_ADDENDUM.md).
@@ -134,7 +136,7 @@ floor. Tune the weights under `[search.ranking]` / `[search.hybrid]`
 An optional third ranker handles **multi-hop** retrieval. With
 `[search.graph] enabled`, search runs a **Personalized PageRank** pass over a
 chunk similarity graph seeded by the query's dense matches, fused into the same
-RRF — so a chunk relevant *because it links to* relevant material surfaces even
+RRF — so a chunk relevant _because it links to_ relevant material surfaces even
 when its own text shares no tokens with the query. This is HippoRAG's mechanism
 (arXiv:2405.14831, in this corpus), walking the KB's existing similarity and
 `[[id]]` edges instead of an LLM-extracted entity graph — no new index, no extra
@@ -199,7 +201,7 @@ kb cortex rebuild                       # recompute the whole layer from the emb
 
 Cortex is what makes the KB behave less like a search index and more like a
 mind: it keeps forming connections between what you've saved, and surfaces the
-*unexpected* ones. On every ingest it materializes edges from the new
+_unexpected_ ones. On every ingest it materializes edges from the new
 document's chunks to the rest of the corpus and keeps the **surprising** ones —
 not nearest-neighbor similarity (that only finds near-duplicates), but
 connections that are semantically close yet structurally distant, which is
@@ -208,7 +210,7 @@ embedding cache, no extra calls):
 
 - **need → solution** (directed): one chunk's `future_work`/`limitations` (a
   stated need) sits close to another's `method`/`experiments`/`applications` (a
-  delivered capability) — *"someone wished for this; someone else built it."*
+  delivered capability) — _"someone wished for this; someone else built it."_
   This uses the corpus's section types, a structural signal most systems
   discard.
 - **cross-domain** (undirected): two chunks are close in meaning but their
@@ -232,12 +234,12 @@ with `[cortex] enabled = false`.
 ```
 
 One of the KB's goals is to constantly hunt for problems worth solving.
-`kb_find_problems` mines the corpus for *unsolved* problems and pairs each
+`kb_find_problems` mines the corpus for _unsolved_ problems and pairs each
 with whatever you've saved that already points toward a solution. Like Cortex,
 it leans on the section types most systems discard: it pulls problem statements
 from papers' `limitations`/`future_work` sections (optionally focused by a
 `domain` query), then for each one searches the corpus's `method`/`applications`
-sections — in *other* papers — for the nearest work. Every candidate comes back
+sections — in _other_ papers — for the nearest work. Every candidate comes back
 tagged with a `gap_type`:
 
 - **`synthesis_opportunity`** — solution pieces exist across other papers but
@@ -318,22 +320,22 @@ and requires an `X-KB-Key` header on every request; the key is generated
 on first run, stored mode-0600 in `.arxiv-kb/api_key`, and printed on
 startup (override with `KB_API_KEY`, rotate with `kb rotate-key`).
 
-| Method & path | Purpose |
-|---|---|
-| `GET /` | the web app (no key required for the shell) |
-| `GET /health` | liveness probe (no key required) |
-| `GET /stats` | corpus stats |
-| `GET /papers` | list documents (`?tag=`, `?category=`) |
-| `GET /papers/{id}` | metadata + notes + PDF path |
-| `POST /search` | semantic search (body: `query`, `mode`, `k`, filters) |
-| `POST /problems` | hunt unsolved problems (limitations/future_work) paired with nearby method/applications work (body: optional `domain`, `k`) |
-| `GET /papers/{id}/similar` | documents most similar to this one (`?limit=`) |
-| `GET /graph` | the corpus as nodes + edges (`?neighbors=` similarity edges per node) |
-| `GET /sparks` | Cortex's surprising connections (`?kind=need_solution\|cross_domain`, `?limit=`) |
-| `POST /chat` | RAG answer over the corpus, with cited sources (body: `query`, optional `history`) |
-| `POST /papers/{id}/notes` | append a note and re-embed |
-| `GET /chunks/{id}` | full chunk text + deep link |
-| `GET /open/{id}` | 302 redirect to the PDF deep link |
+| Method & path              | Purpose                                                                                                                     |
+| -------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `GET /`                    | the web app (no key required for the shell)                                                                                 |
+| `GET /health`              | liveness probe (no key required)                                                                                            |
+| `GET /stats`               | corpus stats                                                                                                                |
+| `GET /papers`              | list documents (`?tag=`, `?category=`)                                                                                      |
+| `GET /papers/{id}`         | metadata + notes + PDF path                                                                                                 |
+| `POST /search`             | semantic search (body: `query`, `mode`, `k`, filters)                                                                       |
+| `POST /problems`           | hunt unsolved problems (limitations/future_work) paired with nearby method/applications work (body: optional `domain`, `k`) |
+| `GET /papers/{id}/similar` | documents most similar to this one (`?limit=`)                                                                              |
+| `GET /graph`               | the corpus as nodes + edges (`?neighbors=` similarity edges per node)                                                       |
+| `GET /sparks`              | Cortex's surprising connections (`?kind=need_solution\|cross_domain`, `?limit=`)                                            |
+| `POST /chat`               | RAG answer over the corpus, with cited sources (body: `query`, optional `history`)                                          |
+| `POST /papers/{id}/notes`  | append a note and re-embed                                                                                                  |
+| `GET /chunks/{id}`         | full chunk text + deep link                                                                                                 |
+| `GET /open/{id}`           | 302 redirect to the PDF deep link                                                                                           |
 
 The web app needs no build step. Open the `http://127.0.0.1:4321/?key=…`
 link printed by `kb serve` — it seeds the key into your browser
@@ -352,7 +354,7 @@ link printed by `kb serve` — it seeds the key into your browser
 - **Graph** — the whole corpus as a force-directed graph: a node per
   document (sized by indexed chunk count, colored by kind), edges from
   explicit `[[id]]`/`--link`/`--scope` relations plus nearest-neighbor
-  *similarity* edges. Drag nodes, pan/zoom, filter edge types, highlight by
+  _similarity_ edges. Drag nodes, pan/zoom, filter edge types, highlight by
   text, click a node to open the document.
 - **Sparks** — Cortex's surprising connections, most surprising first: a
   per-connection card with both bridged passages, filterable by signal
@@ -368,6 +370,112 @@ the embedding cache, so they cost no API calls.
 
 Planned for v0.2: `kb excerpt` (compile chosen sections into one PDF).
 
+## The macOS app
+
+`macos/` is **KB.app** — a native SwiftUI client for the knowledge bank. Where
+the web app is a thin browser over the engine, KB.app _owns_ the engine: on
+launch it picks a free loopback port, spawns `kb serve` as a managed child
+process (injecting a generated API key via `KB_API_KEY` so there's no key file
+to race on), polls `/health` until ready, and tears the process down on quit. A
+menu-bar item (`books.vertical.fill`) shows live engine status and can
+start/stop/restart it or reopen the window, so KB stays reachable even with the
+window closed. Secrets live in the macOS **Keychain** (never in UserDefaults or
+logs): an OpenAI key for embeddings/chat, and an optional Anthropic key that the
+Roundtable's Claude agents use.
+
+### Screenshots
+
+|  |  |
+|---|---|
+| ![The Library — an Apple Books-style cover shelf](docs/screenshots/library.png) | ![The knowledge graph of the corpus](docs/screenshots/connections.png) |
+| **Library** — an Apple Books-style cover shelf of the corpus. | **Graph** — the corpus as a force-directed knowledge graph. |
+| ![A paper turned into an HTML book](docs/screenshots/html_view.png) | ![The PDF and generated book side by side](docs/screenshots/pdf_html_side_by_side.png) |
+| **Book** — a paper rendered as a designed HTML book. | **Book + PDF** — the generated book beside the original PDF. |
+
+### Build & run
+
+No Xcode required — the app compiles with the Command Line Tools `swiftc` and
+the bundle is assembled by hand (targets macOS 14+, Apple Silicon):
+
+```bash
+cd macos
+./build.sh      # compiles Sources/ → build/KB.app (ad-hoc signed); also builds the kb-ocr sidecar
+./run.sh        # launches build/KB.app via LaunchServices with your shell's keys forwarded
+```
+
+`run.sh` launches through LaunchServices with `open --env` for two reasons: it
+forwards `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `KB_ROOT` from your shell (so
+dev rebuilds don't re-prompt the Keychain), and only a LaunchServices-launched
+app can spawn WebKit's helper processes that the HTML book viewer needs. A
+`kb-ocr` sidecar (Vision + PDFKit) is built alongside the app so image-only PDFs
+can be OCR'd during ingest.
+
+### What's inside
+
+The sidebar is the whole app. Each entry is a view over the engine's loopback
+API, plus native features the browser can't offer:
+
+- **Brief** — the landing surface; "the KB comes to you." New papers surfaced
+  by your Watches (scored by how strongly they connect to what you already
+  have, with the connecting work named), a resurfaced past reflection, and a few
+  fresh sparks. Ingest a suggested paper inline.
+- **Watches** — standing interests (an arXiv category, author, or free-text
+  query). Refresh polls arXiv for recent submissions and scores each against the
+  corpus; the results feed the Brief.
+- **Search** — narrow/wide semantic search with per-chunk scores and deep
+  links, cross-linking into the reader.
+- **Add** — ingest arXiv ids, web pages, and local PDFs from inside the app.
+- **Library** — an **Apple Books-style cover shelf** (the real first PDF page,
+  rendered once and cached to `<id>/cover.png`; a designed gradient for
+  everything without a PDF) with **browser-style tabs** and split view. Opening a
+  paper gives you:
+  - a **PDF reader** (PDFKit) with the **annotation → notes loop**: select text
+    and **highlight** it (persisted as a JSON sidecar in Application Support —
+    `paper.pdf` is never mutated), **Add to KB Notes** (quoted + page-cited,
+    re-embedded by the engine so it becomes searchable), or **Explain this** (the
+    passage → chat model → a plain-language sheet you can read aloud or save
+    back to notes);
+  - **Clean Read** — a faithful, citation-free rewrite of the paper (the
+    engine's reader / the `clean-paper` skill), rendered natively and readable
+    on its own or side by side with the PDF, with LaTeX math and an outline rail;
+  - **Book mode** — the paper's generated HTML book, if one exists, on its own
+    or side by side with the PDF;
+  - a **Connections** panel — Similar papers + explicit `[[id]]` links + Sparks.
+- **Books** — a shelf of every paper that has a generated HTML book
+  (`write-paper-book`); tapping one opens it in the Library in Book mode.
+- **Bookmarks** — a reading list (a cover shelf of documents you flagged),
+  persisted server-side so it survives reindex.
+- **Notes** — a live markdown editor with debounced preview; ⌘S saves and
+  re-embeds.
+- **Graph** — a native, interactive force-directed render of the corpus
+  (`/graph`): a node per document, similarity + `[[id]]` edges; drag, pan/zoom,
+  filter, click a node to open it.
+- **Chat** — RAG chat over the corpus with numbered, openable citations,
+  multi-turn history, `@persona` support, and read-aloud.
+- **Explore** — a **branching canvas chat**. Start a topic, attach one or more
+  agents (each spawns its own branch), then continue from any node or _join_
+  several branches — the conversation is a git-esque tree/DAG where a node's
+  context is its ancestor path. Explorations are saved and reopenable.
+- **Personas** — a studio for reusable AI agents (name, role, prompt), used
+  across the Roundtable and `@persona` chat.
+- **Sparks** — Cortex's surprising connections (need→solution / cross-domain),
+  most surprising first; click either bridged passage to open its paper.
+- **Problems** — the ResearchAgent's unsolved gaps
+  (`greenfield` / `synthesis_opportunity`); "Brainstorm" hands one to the
+  Roundtable.
+- **Roundtable** — a workspace of **multi-agent debates**: pick a panel of
+  personas, give them an objective, and watch them argue it out live (one debate
+  can stream while you read another, or view two side by side), producing a
+  synthesized report.
+
+Cross-cutting native touches: **read-aloud** anywhere via an
+`AVSpeechSynthesizer` mini-player with a proper transport, cover rendering and
+graph/similarity that reuse the embedding cache (no API calls), and a ⌘,
+Settings window for keys and the corpus location.
+
+Roadmap and status live in [NEW_SWIFT_FEATURES.md](./NEW_SWIFT_FEATURES.md);
+design in [LOCAL_UI_PRD.md](./LOCAL_UI_PRD.md).
+
 ## Claude Code integration
 
 ```bash
@@ -376,15 +484,15 @@ claude mcp add arxiv-kb -- kb mcp
 
 Tools exposed:
 
-| Tool | Purpose |
-|---|---|
-| `kb_search` | Narrow/wide/filtered semantic search (supports `section_types`, `kind`, `project`) |
-| `kb_find_problems` | Hunt the corpus for unsolved problems (limitations/future_work) paired with nearby method/applications work; tags each `greenfield` vs `synthesis_opportunity` |
-| `kb_brief` | The daily brief: new arXiv papers from your watches (scored by corpus connection, with the connecting work named), a resurfaced reflection, fresh sparks, and stats |
-| `kb_get_paper` | Full metadata + notes for a specific document |
-| `kb_add_note` | Append a note to a paper and re-embed immediately |
-| `kb_capture_idea` | Agent-side twin of `kb idea add` — upserts standalone ideas by project |
-| `kb_create_reflection` | Save a cross-paper synthesis reflection; indexed as `reflection` chunks and retrieved by future searches |
+| Tool                   | Purpose                                                                                                                                                             |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `kb_search`            | Narrow/wide/filtered semantic search (supports `section_types`, `kind`, `project`)                                                                                  |
+| `kb_find_problems`     | Hunt the corpus for unsolved problems (limitations/future_work) paired with nearby method/applications work; tags each `greenfield` vs `synthesis_opportunity`      |
+| `kb_brief`             | The daily brief: new arXiv papers from your watches (scored by corpus connection, with the connecting work named), a resurfaced reflection, fresh sparks, and stats |
+| `kb_get_paper`         | Full metadata + notes for a specific document                                                                                                                       |
+| `kb_add_note`          | Append a note to a paper and re-embed immediately                                                                                                                   |
+| `kb_capture_idea`      | Agent-side twin of `kb idea add` — upserts standalone ideas by project                                                                                              |
+| `kb_create_reflection` | Save a cross-paper synthesis reflection; indexed as `reflection` chunks and retrieved by future searches                                                            |
 
 Drop [skill.md](./skill.md) into your Claude Code plugin folder so
 Claude knows when and how to use them.
